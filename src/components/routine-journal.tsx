@@ -218,6 +218,8 @@ export function RoutineJournal({
     exercise: string;
     startedAtMs: number;
   } | null>(null);
+  const [morningFlowActive, setMorningFlowActive] = useState(false);
+  const [minuteAlertedExercise, setMinuteAlertedExercise] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [customExercisesByCategory, setCustomExercisesByCategory] = useState<
     Record<string, string[]>
@@ -407,6 +409,7 @@ export function RoutineJournal({
   }, [activeExercises, entries]);
 
   const completedCount = visibleEntries.filter((entry) => entry.completed).length;
+  const isMorningRoutine = selectedCategory === "Morning Routine";
   const completionPercent =
     visibleEntries.length === 0
       ? 0
@@ -568,6 +571,29 @@ export function RoutineJournal({
     void loadLite();
   }, [activeExercises, activeTab, selectedCategory, selectedDate]);
 
+  useEffect(() => {
+    if (!morningFlowActive || !isMorningRoutine || !activeExerciseTimer) {
+      return;
+    }
+
+    const elapsed = Math.floor((nowMs - activeExerciseTimer.startedAtMs) / 1000);
+    if (elapsed < 60 || minuteAlertedExercise === activeExerciseTimer.exercise) {
+      return;
+    }
+
+    emitSwitchSignal();
+    setMinuteAlertedExercise(activeExerciseTimer.exercise);
+    setStatusText(
+      `1 Minute erreicht bei ${activeExerciseTimer.exercise}. Wechsel bereit - mit Done zur nächsten Übung.`,
+    );
+  }, [
+    activeExerciseTimer,
+    isMorningRoutine,
+    minuteAlertedExercise,
+    morningFlowActive,
+    nowMs,
+  ]);
+
   const handleEntryChange = (
     exercise: string,
     patch: Partial<Omit<EntryState, "exercise">>,
@@ -596,11 +622,81 @@ export function RoutineJournal({
     setActiveExerciseTimer(null);
   };
 
+  const emitSwitchSignal = () => {
+    if (typeof window !== "undefined" && "vibrate" in navigator) {
+      navigator.vibrate([120, 80, 120]);
+    }
+
+    if (typeof AudioContext === "undefined") {
+      return;
+    }
+
+    try {
+      const audioContext = new AudioContext();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = 900;
+      gainNode.gain.value = 0.08;
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.18);
+    } catch (error) {
+      console.error("Audio signal failed", error);
+    }
+  };
+
   const startExerciseTimer = (exercise: string) => {
     if (activeExerciseTimer) {
       pauseExerciseTimer(activeExerciseTimer.exercise);
     }
+    setMinuteAlertedExercise(null);
     setActiveExerciseTimer({ exercise, startedAtMs: Date.now() });
+  };
+
+  const advanceMorningFlow = (currentExercise: string) => {
+    const currentIndex = activeExercises.findIndex((exercise) => exercise === currentExercise);
+    const nextExercise = activeExercises[currentIndex + 1];
+
+    pauseExerciseTimer(currentExercise);
+
+    if (!nextExercise) {
+      setMorningFlowActive(false);
+      setStatusText("Morning Flow abgeschlossen - stark durchgezogen!");
+      return;
+    }
+
+    setMinuteAlertedExercise(null);
+    setActiveExerciseTimer({ exercise: nextExercise, startedAtMs: Date.now() });
+    setStatusText(`Weiter mit: ${nextExercise}`);
+  };
+
+  const handleCompletedToggle = (exercise: string, checked: boolean) => {
+    handleEntryChange(exercise, { completed: checked });
+
+    if (!checked || !isMorningRoutine || !morningFlowActive) {
+      return;
+    }
+
+    advanceMorningFlow(exercise);
+  };
+
+  const startMorningFlow = () => {
+    if (!isMorningRoutine || activeExercises.length === 0) {
+      setErrorText("Morning Flow ist nur in der Kategorie Morning Routine verfügbar.");
+      return;
+    }
+
+    const firstExercise = activeExercises.includes("Lymphatic hops")
+      ? "Lymphatic hops"
+      : activeExercises[0];
+
+    setMorningFlowActive(true);
+    setMinuteAlertedExercise(null);
+    setActiveExerciseTimer({ exercise: firstExercise, startedAtMs: Date.now() });
+    setStatusText(`Morning Flow gestartet mit: ${firstExercise}`);
+    setErrorText("");
   };
 
   const toggleExerciseVisibility = (exercise: string) => {
@@ -850,6 +946,8 @@ export function RoutineJournal({
           onClick={() => {
             setOverallStartedAtMs(null);
             setActiveExerciseTimer(null);
+            setMorningFlowActive(false);
+            setMinuteAlertedExercise(null);
             setActiveTab("cloud");
           }}
           className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
@@ -863,6 +961,8 @@ export function RoutineJournal({
           onClick={() => {
             setOverallStartedAtMs(null);
             setActiveExerciseTimer(null);
+            setMorningFlowActive(false);
+            setMinuteAlertedExercise(null);
             setActiveTab("lite");
           }}
           className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
@@ -996,6 +1096,8 @@ export function RoutineJournal({
               onChange={(event) => {
                 setOverallStartedAtMs(null);
                 setActiveExerciseTimer(null);
+                setMorningFlowActive(false);
+                setMinuteAlertedExercise(null);
                 setSelectedDate(event.target.value);
               }}
               className="rounded-lg border border-slate-400 px-3 py-2 text-slate-900"
@@ -1010,6 +1112,8 @@ export function RoutineJournal({
                 const nextCategory = event.target.value;
                 setOverallStartedAtMs(null);
                 setActiveExerciseTimer(null);
+                setMorningFlowActive(false);
+                setMinuteAlertedExercise(null);
                 setSelectedCategory(nextCategory);
               }}
               className="rounded-lg border border-slate-400 px-3 py-2 text-slate-900"
@@ -1069,6 +1173,45 @@ export function RoutineJournal({
             </button>
           </div>
         </div>
+
+        {isMorningRoutine ? (
+          <div className="mt-4 rounded-xl border border-emerald-300 bg-emerald-50 p-3">
+            <p className="text-sm font-semibold text-emerald-950">
+              Morning Flow (1 Minute pro Übung)
+            </p>
+            <p className="mt-1 text-xs font-medium text-emerald-800">
+              Startet bei Lymphatic hops. Mit Done springt der Timer direkt zur nächsten Übung.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={startMorningFlow}
+                className="rounded-lg bg-emerald-700 px-3 py-1.5 text-sm font-semibold text-white"
+              >
+                Flow starten
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeExerciseTimer) {
+                    pauseExerciseTimer(activeExerciseTimer.exercise);
+                  }
+                  setMorningFlowActive(false);
+                  setMinuteAlertedExercise(null);
+                  setStatusText("Morning Flow pausiert.");
+                }}
+                className="rounded-lg border border-emerald-700 px-3 py-1.5 text-sm font-semibold text-emerald-900"
+              >
+                Flow stoppen
+              </button>
+              {morningFlowActive && activeExerciseTimer ? (
+                <span className="rounded-full bg-emerald-200 px-2 py-1 text-xs font-bold text-emerald-900">
+                  Aktuell: {activeExerciseTimer.exercise}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
 
         {activeTab === "cloud" ? (
           <div className="mt-4 rounded-lg border border-teal-300 bg-teal-100 p-3">
@@ -1233,7 +1376,7 @@ export function RoutineJournal({
                       type="checkbox"
                       checked={entry.completed}
                       onChange={(event) =>
-                        handleEntryChange(entry.exercise, { completed: event.target.checked })
+                        handleCompletedToggle(entry.exercise, event.target.checked)
                       }
                       className="mt-1 h-4 w-4"
                     />
