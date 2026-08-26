@@ -80,6 +80,42 @@ function getLastNDays(days: number) {
   });
 }
 
+function getWeekKeysMondayToSunday(anchorDateKey: string) {
+  const anchor = new Date(`${anchorDateKey}T00:00:00`);
+  const day = anchor.getDay();
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  const monday = new Date(anchor);
+  monday.setDate(anchor.getDate() + diffToMonday);
+
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(monday);
+    date.setDate(monday.getDate() + index);
+    return getDateKeyFromDate(date);
+  });
+}
+
+function getMonthMeta(anchorDateKey: string) {
+  const anchor = new Date(`${anchorDateKey}T00:00:00`);
+  const year = anchor.getFullYear();
+  const month = anchor.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const firstDayWeek = firstDay.getDay();
+  const offset = firstDayWeek === 0 ? 6 : firstDayWeek - 1; // Monday first
+
+  const keys = Array.from({ length: daysInMonth }, (_, index) => {
+    const day = index + 1;
+    const date = new Date(year, month, day);
+    return getDateKeyFromDate(date);
+  });
+
+  return {
+    label: anchor.toLocaleDateString("de-DE", { month: "long", year: "numeric" }),
+    offset,
+    keys,
+  };
+}
+
 function formatSeconds(totalSeconds: number): string {
   const safe = Math.max(0, totalSeconds);
   const minutes = Math.floor(safe / 60);
@@ -239,18 +275,34 @@ export function RoutineJournal({
         totalSessions: 0,
         totalCompleted: 0,
         topExercises: [] as Array<{ name: string; count: number }>,
-        calendar: getLastNDays(7).map((key) => ({ key, count: 0 })),
+        recent7Days: getLastNDays(7).map((key) => ({ key, count: 0 })),
+        weekView: getWeekKeysMondayToSunday(selectedDate).map((key) => ({
+          key,
+          count: 0,
+          done: false,
+        })),
+        monthLabel: getMonthMeta(selectedDate).label,
+        monthOffset: getMonthMeta(selectedDate).offset,
+        monthView: getMonthMeta(selectedDate).keys.map((key) => ({
+          key,
+          day: Number.parseInt(key.slice(8, 10), 10),
+          done: false,
+        })),
       };
     }
 
-    const dayKeys = getLastNDays(7);
+    const recent7 = getLastNDays(7);
+    const weekKeys = getWeekKeysMondayToSunday(selectedDate);
+    const monthMeta = getMonthMeta(selectedDate);
     const counts = new Map<string, number>();
+    const dayDone = new Map<string, boolean>();
     const exerciseCounts = new Map<string, number>();
     let totalSessions = 0;
     let totalCompleted = 0;
 
-    for (const dayKey of dayKeys) {
+    for (const dayKey of [...recent7, ...weekKeys, ...monthMeta.keys]) {
       counts.set(dayKey, 0);
+      dayDone.set(dayKey, false);
     }
 
     const localKeys = Object.keys(localStorage);
@@ -271,6 +323,8 @@ export function RoutineJournal({
 
         if (completedEntries.length > 0) {
           totalSessions += 1;
+          const dateKey = key.replace("momentum-lite:", "").split(":")[0];
+          dayDone.set(dateKey, true);
         }
         totalCompleted += completedEntries.length;
 
@@ -282,6 +336,9 @@ export function RoutineJournal({
           const dateKey = key.replace("momentum-lite:", "").split(":")[0];
           if (counts.has(dateKey)) {
             counts.set(dateKey, (counts.get(dateKey) ?? 0) + completedEntries.length);
+          }
+          if (completedEntries.length > 0) {
+            dayDone.set(dateKey, true);
           }
         }
       } catch {
@@ -296,9 +353,21 @@ export function RoutineJournal({
         .map(([name, count]) => ({ name, count }))
         .sort((a, b) => b.count - a.count)
         .slice(0, 5),
-      calendar: dayKeys.map((key) => ({ key, count: counts.get(key) ?? 0 })),
+      recent7Days: recent7.map((key) => ({ key, count: counts.get(key) ?? 0 })),
+      weekView: weekKeys.map((key) => ({
+        key,
+        count: counts.get(key) ?? 0,
+        done: dayDone.get(key) ?? false,
+      })),
+      monthLabel: monthMeta.label,
+      monthOffset: monthMeta.offset,
+      monthView: monthMeta.keys.map((key) => ({
+        key,
+        day: Number.parseInt(key.slice(8, 10), 10),
+        done: dayDone.get(key) ?? false,
+      })),
     };
-  }, []);
+  }, [selectedDate]);
 
   const baseExercises = useMemo(
     () => categories.find((item) => item.name === selectedCategory)?.exercises ?? [],
@@ -743,13 +812,13 @@ export function RoutineJournal({
     <section className="flex flex-1 flex-col gap-4">
       {activeTab === "lite" ? (
         <div className="overflow-hidden rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 via-orange-50 to-yellow-50 shadow-sm">
-          <div className="relative h-48 w-full sm:h-60">
+          <div className="relative h-64 w-full bg-rose-100 sm:h-72">
             <Image
               src="/hero-love.jpg"
               alt="Herzgesicht / Motivationsbild"
               fill
               priority
-              className="object-cover"
+              className="object-contain object-top p-2"
             />
           </div>
           <div className="p-4 text-center">
@@ -757,7 +826,7 @@ export function RoutineJournal({
               Motivation
             </p>
             <h1 className="mt-2 text-2xl font-black text-rose-700 sm:text-3xl">
-              Einfach machen Bljad. 💪 Für eine bessere Zukunft. Für LUIS. ❤️ 👨‍👩‍👧‍👦
+              Einfach machen Bljad. 💪 Für eine bessere Zukunft. Für LUIS. ❤️ 👨‍👩‍👦
             </h1>
           </div>
         </div>
@@ -841,7 +910,7 @@ export function RoutineJournal({
             <div className="rounded-lg bg-amber-50 p-3">
               <p className="text-xs uppercase tracking-[0.12em] text-amber-700">Streak</p>
               <p className="mt-2 text-2xl font-black text-amber-900">
-                {overviewStats.calendar.filter((day) => day.count > 0).length}
+                {overviewStats.recent7Days.filter((day) => day.count > 0).length}
               </p>
             </div>
           </div>
@@ -849,21 +918,22 @@ export function RoutineJournal({
           <div className="mt-4 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
-                Vergangenheit (7 Tage)
+                Wochenview (Mo-So)
               </p>
               <div className="mt-2 grid grid-cols-7 gap-2">
-                {overviewStats.calendar.map((day) => (
+                {overviewStats.weekView.map((day) => (
                   <div key={day.key} className="rounded-lg border border-slate-200 bg-white p-2 text-center">
                     <div className="text-[10px] font-semibold uppercase text-slate-500">
                       {new Date(`${day.key}T00:00:00`).toLocaleDateString("de-DE", { weekday: "short" })}
                     </div>
                     <div
                       className={`mt-2 mx-auto flex h-10 w-10 items-center justify-center rounded-full text-xs font-black ${
-                        day.count > 0 ? "bg-emerald-500 text-white" : "bg-slate-200 text-slate-600"
+                        day.done ? "bg-emerald-500 text-white" : "bg-slate-200 text-slate-600"
                       }`}
                     >
-                      {day.count}
+                      {day.done ? "✓" : "–"}
                     </div>
+                    <div className="mt-1 text-[10px] font-semibold text-slate-500">{day.count}</div>
                   </div>
                 ))}
               </div>
@@ -889,6 +959,30 @@ export function RoutineJournal({
                   ))
                 )}
               </ul>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
+              Monatsview ({overviewStats.monthLabel})
+            </p>
+            <div className="mt-2 grid grid-cols-7 gap-1.5">
+              {Array.from({ length: overviewStats.monthOffset }).map((_, index) => (
+                <div key={`empty-${index}`} />
+              ))}
+              {overviewStats.monthView.map((day) => (
+                <div
+                  key={day.key}
+                  className={`rounded-md border p-1 text-center text-[11px] font-semibold ${
+                    day.done
+                      ? "border-emerald-300 bg-emerald-100 text-emerald-900"
+                      : "border-slate-200 bg-white text-slate-600"
+                  }`}
+                >
+                  <div>{day.day}</div>
+                  <div className="text-[10px]">{day.done ? "✓" : ""}</div>
+                </div>
+              ))}
             </div>
           </div>
         </div>
