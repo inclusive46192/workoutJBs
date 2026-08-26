@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
@@ -661,17 +662,39 @@ export function RoutineJournal({
 
   return (
     <section className="flex flex-1 flex-col gap-4">
-      <header className="rounded-2xl bg-gradient-to-r from-teal-700 via-emerald-700 to-cyan-700 p-5 text-white shadow-lg">
-        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-cyan-100">
-          Momentum Journal
-        </p>
-        <h1 className="mt-1 text-2xl font-bold sm:text-3xl">
-          Sportlich motivierend. Ruhig wie ein Tagebuch.
-        </h1>
-        <p className="mt-2 text-sm font-medium text-cyan-50">
-          {encouragement[new Date().getDate() % encouragement.length]}
-        </p>
-      </header>
+      {activeTab === "lite" ? (
+        <div className="overflow-hidden rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 via-orange-50 to-yellow-50 shadow-sm">
+          <div className="relative h-48 w-full sm:h-60">
+            <Image
+              src="/hero-love.jpg"
+              alt="Herzgesicht / Motivationsbild"
+              fill
+              priority
+              className="object-cover"
+            />
+          </div>
+          <div className="p-4 text-center">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-rose-500">
+              Motivation
+            </p>
+            <h1 className="mt-2 text-2xl font-black text-rose-700 sm:text-3xl">
+              Ich liebe dich! Wir schaffen das gemeinsam!
+            </h1>
+          </div>
+        </div>
+      ) : (
+        <header className="rounded-2xl bg-gradient-to-r from-teal-700 via-emerald-700 to-cyan-700 p-5 text-white shadow-lg">
+          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-cyan-100">
+            Momentum Journal
+          </p>
+          <h1 className="mt-1 text-2xl font-bold sm:text-3xl">
+            Sportlich motivierend. Ruhig wie ein Tagebuch.
+          </h1>
+          <p className="mt-2 text-sm font-medium text-cyan-50">
+            {encouragement[new Date().getDate() % encouragement.length]}
+          </p>
+        </header>
+      )}
 
       <div className="flex gap-2 rounded-xl bg-slate-200 p-1">
         <button
