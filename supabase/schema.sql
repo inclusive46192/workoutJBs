@@ -9,9 +9,17 @@ create table if not exists public.daily_entries (
   completed boolean not null default false,
   reps integer null check (reps >= 0),
   duration_minutes integer null check (duration_minutes >= 0),
+  target_minutes integer null check (target_minutes >= 0),
+  tracked_seconds integer not null default 0 check (tracked_seconds >= 0),
   notes text null,
   updated_at timestamptz not null default now()
 );
+
+alter table public.daily_entries
+  add column if not exists target_minutes integer null check (target_minutes >= 0);
+
+alter table public.daily_entries
+  add column if not exists tracked_seconds integer not null default 0 check (tracked_seconds >= 0);
 
 create unique index if not exists daily_entries_unique_per_exercise
   on public.daily_entries (user_id, entry_date, category, exercise);
@@ -40,5 +48,46 @@ create policy "Users can update own entries"
 drop policy if exists "Users can delete own entries" on public.daily_entries;
 create policy "Users can delete own entries"
   on public.daily_entries
+  for delete
+  using (auth.uid() = user_id);
+
+create table if not exists public.daily_reflections (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  entry_date date not null,
+  category text not null,
+  mood text not null default 'Neutral',
+  reflection text not null default '',
+  overall_seconds integer not null default 0 check (overall_seconds >= 0),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists daily_reflections_unique_per_category
+  on public.daily_reflections (user_id, entry_date, category);
+
+alter table public.daily_reflections enable row level security;
+
+drop policy if exists "Users can read own reflections" on public.daily_reflections;
+create policy "Users can read own reflections"
+  on public.daily_reflections
+  for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert own reflections" on public.daily_reflections;
+create policy "Users can insert own reflections"
+  on public.daily_reflections
+  for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can update own reflections" on public.daily_reflections;
+create policy "Users can update own reflections"
+  on public.daily_reflections
+  for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can delete own reflections" on public.daily_reflections;
+create policy "Users can delete own reflections"
+  on public.daily_reflections
   for delete
   using (auth.uid() = user_id);
