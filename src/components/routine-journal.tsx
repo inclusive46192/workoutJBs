@@ -64,8 +64,20 @@ const moodOptions = Object.keys(moodTemplates);
 const customExercisesStorageKey = "momentum-config:custom-exercises:v1";
 const hiddenExercisesStorageKey = "momentum-config:hidden-exercises:v1";
 
+function getDateKeyFromDate(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
 function getTodayDateKey() {
-  return new Date().toISOString().slice(0, 10);
+  return getDateKeyFromDate(new Date());
+}
+
+function getLastNDays(days: number) {
+  return Array.from({ length: days }, (_, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() - (days - 1 - index));
+    return getDateKeyFromDate(date);
+  });
 }
 
 function formatSeconds(totalSeconds: number): string {
@@ -218,6 +230,73 @@ export function RoutineJournal({
     }, 1000);
     return () => {
       window.clearInterval(tick);
+    };
+  }, []);
+
+  const overviewStats = useMemo(() => {
+    if (typeof window === "undefined") {
+      return {
+        totalSessions: 0,
+        totalCompleted: 0,
+        topExercises: [] as Array<{ name: string; count: number }>,
+        calendar: getLastNDays(7).map((key) => ({ key, count: 0 })),
+      };
+    }
+
+    const dayKeys = getLastNDays(7);
+    const counts = new Map<string, number>();
+    const exerciseCounts = new Map<string, number>();
+    let totalSessions = 0;
+    let totalCompleted = 0;
+
+    for (const dayKey of dayKeys) {
+      counts.set(dayKey, 0);
+    }
+
+    const localKeys = Object.keys(localStorage);
+    for (const key of localKeys) {
+      if (!key.startsWith("momentum-lite:")) {
+        continue;
+      }
+
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) {
+          continue;
+        }
+
+        const parsed = JSON.parse(raw) as LiteDayPayload | EntryState[];
+        const entries = Array.isArray(parsed) ? parsed : parsed.entries ?? [];
+        const completedEntries = entries.filter((entry) => entry.completed);
+
+        if (completedEntries.length > 0) {
+          totalSessions += 1;
+        }
+        totalCompleted += completedEntries.length;
+
+        for (const entry of completedEntries) {
+          exerciseCounts.set(entry.exercise, (exerciseCounts.get(entry.exercise) ?? 0) + 1);
+        }
+
+        if (!Array.isArray(parsed) && parsed.entries) {
+          const dateKey = key.replace("momentum-lite:", "").split(":")[0];
+          if (counts.has(dateKey)) {
+            counts.set(dateKey, (counts.get(dateKey) ?? 0) + completedEntries.length);
+          }
+        }
+      } catch {
+        // ignore invalid cached data
+      }
+    }
+
+    return {
+      totalSessions,
+      totalCompleted,
+      topExercises: Array.from(exerciseCounts.entries())
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5),
+      calendar: dayKeys.map((key) => ({ key, count: counts.get(key) ?? 0 })),
     };
   }, []);
 
@@ -678,7 +757,7 @@ export function RoutineJournal({
               Motivation
             </p>
             <h1 className="mt-2 text-2xl font-black text-rose-700 sm:text-3xl">
-              Ich liebe dich! Wir schaffen das gemeinsam!
+              Einfach machen Bljad. 💪 Für eine bessere Zukunft. Für LUIS. ❤️ 👨‍👩‍👧‍👦
             </h1>
           </div>
         </div>
@@ -735,6 +814,85 @@ export function RoutineJournal({
       ) : null}
 
       <div className="rounded-xl border border-slate-300 bg-white p-4 shadow-sm">
+        <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-bold uppercase tracking-[0.14em] text-slate-700">
+              Überblick
+            </p>
+            <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-800">
+              {overviewStats.totalSessions} Sessions
+            </span>
+          </div>
+          <div className="mt-3 grid gap-3 sm:grid-cols-4">
+            <div className="rounded-lg bg-emerald-50 p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-emerald-700">Absolviert</p>
+              <p className="mt-2 text-2xl font-black text-emerald-900">{overviewStats.totalSessions}</p>
+            </div>
+            <div className="rounded-lg bg-cyan-50 p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-cyan-700">Übungen</p>
+              <p className="mt-2 text-2xl font-black text-cyan-900">{overviewStats.totalCompleted}</p>
+            </div>
+            <div className="rounded-lg bg-violet-50 p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-violet-700">Top Übung</p>
+              <p className="mt-2 text-sm font-black text-violet-900">
+                {overviewStats.topExercises[0]?.name ?? "Noch keine"}
+              </p>
+            </div>
+            <div className="rounded-lg bg-amber-50 p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-amber-700">Streak</p>
+              <p className="mt-2 text-2xl font-black text-amber-900">
+                {overviewStats.calendar.filter((day) => day.count > 0).length}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
+                Vergangenheit (7 Tage)
+              </p>
+              <div className="mt-2 grid grid-cols-7 gap-2">
+                {overviewStats.calendar.map((day) => (
+                  <div key={day.key} className="rounded-lg border border-slate-200 bg-white p-2 text-center">
+                    <div className="text-[10px] font-semibold uppercase text-slate-500">
+                      {new Date(`${day.key}T00:00:00`).toLocaleDateString("de-DE", { weekday: "short" })}
+                    </div>
+                    <div
+                      className={`mt-2 mx-auto flex h-10 w-10 items-center justify-center rounded-full text-xs font-black ${
+                        day.count > 0 ? "bg-emerald-500 text-white" : "bg-slate-200 text-slate-600"
+                      }`}
+                    >
+                      {day.count}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
+                Häufigste Übungen
+              </p>
+              <ul className="mt-2 space-y-2">
+                {overviewStats.topExercises.length === 0 ? (
+                  <li className="text-sm text-slate-500">Noch keine erledigten Übungen gespeichert.</li>
+                ) : (
+                  overviewStats.topExercises.map((item, index) => (
+                    <li key={item.name} className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm">
+                      <span className="font-medium text-slate-700">
+                        {index + 1}. {item.name}
+                      </span>
+                      <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs font-bold text-slate-700">
+                        {item.count}x
+                      </span>
+                    </li>
+                  ))
+                )}
+              </ul>
+            </div>
+          </div>
+        </div>
+
         <div className="grid gap-3 sm:grid-cols-3">
           <label className="flex flex-col gap-1 text-sm font-medium text-slate-900">
             Datum
