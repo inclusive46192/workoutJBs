@@ -1,4 +1,74 @@
-# Workout1
+<<<<<<< HEAD
+# Momentum Journal (Next.js + Supabase + PWA)
+
+MVP fuer:
+- Cloud Journal mit Benutzerkonto (Magic Link)
+- Cloud Sync + Tages-Tracking (erledigt + optionale Details)
+- Offline-Lite parallel (ohne Login, lokale Speicherung)
+- Mobil-first PWA fuer Handy-Nutzung
+
+## Lokaler Start
+
+```bash
+npm install
+npm run dev
+```
+
+Auf Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env.local
+```
+
+Dann [http://localhost:3000](http://localhost:3000) oeffnen.
+
+## Supabase einrichten
+
+1. In Supabase ein neues Projekt erstellen.
+2. In **Authentication > Sign In / Providers** den E-Mail Provider aktivieren (Magic Link / OTP).
+3. SQL aus [supabase/schema.sql](./supabase/schema.sql) im SQL Editor ausfuehren.
+4. In `.env.local` eintragen:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=...
+NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+```
+
+## Netlify Deployment (GitLab Import)
+
+1. Repo nach GitLab pushen (z. B. `https://gitlab.com/jb-group854335/...`).
+2. In Netlify: **Add new site > Import an existing project > GitLab**.
+3. Build-Settings:
+   - Build command: `npm run build`
+   - Publish directory: `.next`
+4. Umgebungsvariablen in Netlify setzen:
+   - `NEXT_PUBLIC_SUPABASE_URL`
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+5. Deploy starten.
+
+Die Datei [netlify.toml](./netlify.toml) ist bereits fuer Next.js Runtime konfiguriert.
+
+## App-Struktur
+
+- `/` -> Cloud Journal als Standard
+- `/lite` -> reine Offline-Lite-Ansicht
+- Tabs in der Hauptansicht:
+  - **Cloud Journal** (mit Login + Sync)
+  - **Offline Lite** (lokal, ohne Login)
+
+## Tracking-Daten pro Uebung
+
+- erledigt (Checkbox)
+- Wiederholungen (optional)
+- Dauer in Minuten (optional)
+- Notiz (optional)
+
+## Hinweise
+
+- PWA Manifest und Service Worker sind aktiv.
+- Fuer spaetere Erweiterungen (z. B. Streaks, Wochen-Statistik, eigene Uebungen) ist die Basis vorbereitet.
+=======
+# Workout
 
 
 
@@ -15,14 +85,14 @@ Already a pro? Just edit this README.md and make it your own. Want to make it ea
 
 ```
 cd existing_repo
-git remote add origin https://gitlab.com/jb-group854335/Workout1.git
+git remote add origin https://gitlab.com/jb-group854335/Workout.git
 git branch -M main
 git push -uf origin main
 ```
 
 ## Integrate with your tools
 
-* [Set up project integrations](https://gitlab.com/jb-group854335/Workout1/-/settings/integrations)
+* [Set up project integrations](https://gitlab.com/jb-group854335/Workout/-/settings/integrations)
 
 ## Collaborate with your team
 
@@ -91,3 +161,4 @@ For open source projects, say how it is licensed.
 
 ## Project status
 If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+>>>>>>> origin/main
