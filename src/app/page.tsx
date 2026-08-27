@@ -7,7 +7,7 @@ export default function Home() {
       <RoutineJournal
         initialTab="cloud"
         categories={journalCategories}
-        showLiteLink
+        showOfflineCopyButton
       />
     </main>
   );

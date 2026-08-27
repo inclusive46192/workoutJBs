@@ -11,6 +11,8 @@ type RoutineJournalProps = {
   initialTab: "cloud" | "lite";
   categories: JournalCategory[];
   showLiteLink?: boolean;
+  showOfflineCopyButton?: boolean;
+  hiddenLiteHero?: boolean;
 };
 
 type JournalTab = "cloud" | "lite";
@@ -19,6 +21,7 @@ type EntryState = {
   exercise: string;
   completed: boolean;
   reps: string;
+  weightKg: string;
   durationMinutes: string;
   targetMinutes: string;
   trackedSeconds: number;
@@ -29,6 +32,7 @@ type CloudRow = {
   exercise: string;
   completed: boolean;
   reps: number | null;
+  weight_kg?: number | null;
   duration_minutes: number | null;
   target_minutes?: number | null;
   tracked_seconds?: number | null;
@@ -72,6 +76,79 @@ const moodTemplates: Record<string, string> = {
 const moodOptions = Object.keys(moodTemplates);
 const customExercisesStorageKey = "momentum-config:custom-exercises:v1";
 const hiddenExercisesStorageKey = "momentum-config:hidden-exercises:v1";
+const bodybuildingPlanMap: Record<string, string[]> = {
+  "Push / Pull / Legs": [
+    "Bench Press",
+    "Incline Dumbbell Press",
+    "Chest Dip",
+    "Barbell Row",
+    "One-Arm Dumbbell Row",
+    "Pull-Up",
+    "Lat Pulldown",
+    "Overhead Press",
+    "Dumbbell Shoulder Press",
+    "Barbell Squat",
+    "Goblet Squat",
+    "Romanian Deadlift",
+    "Walking Lunge",
+    "Leg Press",
+    "Seated Leg Curl",
+  ],
+  "4er Split": [
+    "Bench Press",
+    "Incline Dumbbell Press",
+    "Barbell Row",
+    "Lat Pulldown",
+    "Overhead Press",
+    "Barbell Squat",
+    "Romanian Deadlift",
+    "Dumbbell Curl",
+    "Triceps Dip",
+    "Lateral Raise",
+  ],
+  "5er Split": [
+    "Bench Press",
+    "Incline Dumbbell Press",
+    "Barbell Row",
+    "Pull-Up",
+    "Overhead Press",
+    "Barbell Squat",
+    "Romanian Deadlift",
+    "Dumbbell Curl",
+    "Cable Fly",
+    "Seated Leg Curl",
+  ],
+  "Upper / Lower": [
+    "Bench Press",
+    "Chest Dip",
+    "Barbell Row",
+    "Pull-Up",
+    "Overhead Press",
+    "Barbell Squat",
+    "Leg Press",
+    "Romanian Deadlift",
+    "Dumbbell Curl",
+    "Skull Crusher",
+  ],
+};
+const bodybuildingMuscleGroups = [
+  "Alle",
+  "Brust",
+  "Rücken",
+  "Schultern",
+  "Arme",
+  "Beine",
+  "Core",
+] as const;
+const bodybuildingMuscleMap: Record<string, string[]> = {
+  Alle: [],
+  Brust: ["Bench Press", "Incline Dumbbell Press", "Chest Dip", "Cable Fly"],
+  Rücken: ["Barbell Row", "One-Arm Dumbbell Row", "Pull-Up", "Lat Pulldown"],
+  Schultern: ["Overhead Press", "Dumbbell Shoulder Press", "Lateral Raise"],
+  Arme: ["Dumbbell Curl", "Barbell Curl", "Triceps Dip", "Skull Crusher"],
+  Beine: ["Barbell Squat", "Goblet Squat", "Romanian Deadlift", "Walking Lunge", "Leg Press", "Seated Leg Curl"],
+  Core: [],
+};
 const journalArchiveStorageKey = "momentum-journal:archive:v1";
 
 function getDateKeyFromDate(date: Date) {
@@ -153,6 +230,7 @@ function buildDefaultEntries(exercises: string[]): EntryState[] {
     exercise,
     completed: false,
     reps: "",
+    weightKg: "",
     durationMinutes: "",
     targetMinutes: "",
     trackedSeconds: 0,
@@ -175,6 +253,7 @@ function toEntryMap(rows: CloudRow[], exercises: string[]): EntryState[] {
       exercise,
       completed: row?.completed ?? false,
       reps: row?.reps?.toString() ?? "",
+      weightKg: row?.weight_kg?.toString() ?? "",
       durationMinutes: row?.duration_minutes?.toString() ?? "",
       targetMinutes: row?.target_minutes?.toString() ?? "",
       trackedSeconds: row?.tracked_seconds ?? 0,
@@ -198,6 +277,7 @@ function normalizeEntries(entries: Partial<EntryState>[], exercises: string[]): 
       exercise,
       completed: row?.completed ?? false,
       reps: row?.reps ?? "",
+      weightKg: row?.weightKg ?? "",
       durationMinutes: row?.durationMinutes ?? "",
       targetMinutes: row?.targetMinutes ?? "",
       trackedSeconds: row?.trackedSeconds ?? 0,
@@ -206,14 +286,20 @@ function normalizeEntries(entries: Partial<EntryState>[], exercises: string[]): 
   });
 }
 
-function getExerciseTargetSeconds(customSeconds: ExerciseSecondMap, exercise: string): number {
-  return customSeconds[exercise] ?? 60;
+function getExerciseTargetSeconds(
+  customSeconds: ExerciseSecondMap,
+  exercise: string,
+  fallbackSeconds = 60,
+): number {
+  return customSeconds[exercise] ?? fallbackSeconds;
 }
 
 export function RoutineJournal({
   initialTab,
   categories,
   showLiteLink = false,
+  showOfflineCopyButton = false,
+  hiddenLiteHero = false,
 }: RoutineJournalProps) {
   const supabase = useMemo(() => getSupabaseClient(), []);
   const supabaseReady = Boolean(supabase);
@@ -221,6 +307,7 @@ export function RoutineJournal({
   const [activeTab, setActiveTab] = useState<JournalTab>(initialTab);
   const [selectedCategory, setSelectedCategory] = useState(categories[0]?.name ?? "");
   const [selectedDate, setSelectedDate] = useState(getTodayDateKey());
+  const [bodybuildingPlan, setBodybuildingPlan] = useState("Push / Pull / Legs");
   const [entries, setEntries] = useState<EntryState[]>(() =>
     buildDefaultEntries(categories[0]?.exercises ?? []),
   );
@@ -279,6 +366,7 @@ export function RoutineJournal({
   const [halfwayAlertEnabled, setHalfwayAlertEnabled] = useState(false);
   const [showExerciseLibrary, setShowExerciseLibrary] = useState(false);
   const [showJournalArchive, setShowJournalArchive] = useState(false);
+  const [bodybuildingMuscleFilter, setBodybuildingMuscleFilter] = useState<(typeof bodybuildingMuscleGroups)[number]>('Alle');
   const [journalArchive, setJournalArchive] = useState<JournalArchiveEntry[]>([]);
   const [expandedArchiveKeys, setExpandedArchiveKeys] = useState<Set<string>>(new Set());
 
@@ -424,24 +512,43 @@ export function RoutineJournal({
     return allExercisesForCategory.filter((exercise) => !hiddenExercises.includes(exercise));
   }, [allExercisesForCategory, hiddenExercises]);
 
+  const filteredBodybuildingExercises = useMemo(() => {
+    if (selectedCategory !== "Bodybuilding") {
+      return activeExercises;
+    }
+
+    const selectedGroup = bodybuildingMuscleFilter;
+    const allowed = bodybuildingMuscleMap[selectedGroup] ?? [];
+    if (selectedGroup === "Alle") {
+      return activeExercises;
+    }
+
+    return activeExercises.filter((exercise) => allowed.includes(exercise));
+  }, [activeExercises, bodybuildingMuscleFilter, selectedCategory]);
+
   const visibleEntries = useMemo(() => {
+    const exercisesForView = selectedCategory === "Bodybuilding" ? filteredBodybuildingExercises : activeExercises;
     const map = new Map(entries.map((entry) => [entry.exercise, entry]));
-    return activeExercises.map(
+    return exercisesForView.map(
       (exercise) =>
         map.get(exercise) ?? {
           exercise,
           completed: false,
           reps: "",
+          weightKg: "",
           durationMinutes: "",
           targetMinutes: "",
           trackedSeconds: 0,
           notes: "",
         },
     );
-  }, [activeExercises, entries]);
+  }, [activeExercises, entries, filteredBodybuildingExercises, selectedCategory]);
 
   const completedCount = visibleEntries.filter((entry) => entry.completed).length;
   const isMorningRoutine = selectedCategory === "Morning Routine";
+  const isTabata = selectedCategory === "Tabata";
+  const isBodybuilding = selectedCategory === "Bodybuilding";
+  const isFlowCategory = isMorningRoutine || isTabata;
   const completionPercent =
     visibleEntries.length === 0
       ? 0
@@ -672,7 +779,9 @@ export function RoutineJournal({
 
     if (!nextExercise) {
       setMorningFlowActive(false);
-      setStatusText("Morning Flow abgeschlossen - stark durchgezogen!");
+      setStatusText(
+        `${isTabata ? "Tabata" : "Morning"} Flow abgeschlossen - stark durchgezogen!`,
+      );
       return;
     }
 
@@ -684,7 +793,7 @@ export function RoutineJournal({
   const handleCompletedToggle = (exercise: string, checked: boolean) => {
     handleEntryChange(exercise, { completed: checked });
 
-    if (!checked || !isMorningRoutine || !morningFlowActive) {
+    if (!checked || !isFlowCategory || !morningFlowActive) {
       return;
     }
 
@@ -692,8 +801,8 @@ export function RoutineJournal({
   };
 
   const startMorningFlow = () => {
-    if (!isMorningRoutine || activeExercises.length === 0) {
-      setErrorText("Morning Flow ist nur in der Kategorie Morning Routine verfügbar.");
+    if (!isFlowCategory || activeExercises.length === 0) {
+      setErrorText("Morning Flow / Tabata Flow ist nur in den passenden Kategorien verfügbar.");
       return;
     }
 
@@ -705,7 +814,9 @@ export function RoutineJournal({
     setMorningFlowActive(true);
     setMinuteAlertedExercise(null);
     setActiveExerciseTimer({ exercise: firstExercise, startedAtMs: Date.now() });
-    setStatusText(`Morning Flow gestartet mit: ${firstExercise}`);
+    setStatusText(
+      `${isTabata ? "Tabata" : "Morning"} Flow gestartet mit: ${firstExercise}`,
+    );
     setErrorText("");
 
     if (!overallStartedAtMs) {
@@ -756,6 +867,7 @@ export function RoutineJournal({
         exercise: trimmed,
         completed: false,
         reps: "",
+        weightKg: "",
         durationMinutes: "",
         targetMinutes: "",
         trackedSeconds: 0,
@@ -874,6 +986,7 @@ export function RoutineJournal({
       exercise: entry.exercise,
       completed: entry.completed,
       reps: parsePositiveInt(entry.reps),
+      weight_kg: parsePositiveInt(entry.weightKg),
       duration_minutes: parsePositiveInt(entry.durationMinutes),
       target_minutes: parsePositiveInt(entry.targetMinutes),
       tracked_seconds: entry.trackedSeconds,
@@ -895,6 +1008,7 @@ export function RoutineJournal({
         exercise: entry.exercise,
         completed: entry.completed,
         reps: parsePositiveInt(entry.reps),
+        weight_kg: parsePositiveInt(entry.weightKg),
         duration_minutes: parsePositiveInt(entry.durationMinutes),
         notes: entry.notes.trim() || null,
       }));
@@ -928,6 +1042,15 @@ export function RoutineJournal({
       return;
     }
 
+    if (reflection.text.trim()) {
+      appendJournalArchive({
+        dateKey: selectedDate,
+        category: selectedCategory,
+        mood: reflection.mood,
+        text: reflection.text.trim(),
+      });
+    }
+
     setOverallBaseSeconds(overallLiveSeconds);
     setOverallStartedAtMs(null);
     setStatusText("Cloud-Sync gespeichert.");
@@ -945,9 +1068,9 @@ export function RoutineJournal({
     setStatusText("Abgemeldet.");
   };
 
-  // Morning flow auto-advance with halfway alert
+  // Flow auto-advance with halfway alert for Morning Routine and Tabata
   useEffect(() => {
-    if (!morningFlowActive || !isMorningRoutine || !activeExerciseTimer) {
+    if (!morningFlowActive || !isFlowCategory || !activeExerciseTimer) {
       return;
     }
 
@@ -955,6 +1078,7 @@ export function RoutineJournal({
     const targetSeconds = getExerciseTargetSeconds(
       exerciseCustomSeconds,
       activeExerciseTimer.exercise,
+      isTabata ? 20 : 60,
     );
     const halfwaySeconds = Math.floor(targetSeconds / 2);
 
@@ -977,21 +1101,22 @@ export function RoutineJournal({
       handleEntryChange(activeExerciseTimer.exercise, { completed: true });
       advanceMorningFlow(activeExerciseTimer.exercise);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeExerciseTimer,
     exerciseCustomSeconds,
     halfwayAlertEnabled,
-    isMorningRoutine,
+    isFlowCategory,
+    isTabata,
     minuteAlertedExercise,
     morningFlowActive,
     nowMs,
   ]);
 
   const activeHeroExercise =
-    isMorningRoutine && morningFlowActive && activeExerciseTimer
+    (isMorningRoutine || isTabata) && morningFlowActive && activeExerciseTimer
       ? activeExerciseTimer.exercise
-      : isMorningRoutine
+      : isMorningRoutine || isTabata
         ? (visibleEntries.find((e) => !e.completed)?.exercise ?? activeExercises[0])
         : null;
 
@@ -1033,9 +1158,11 @@ export function RoutineJournal({
     heroTargetSeconds > 0 ? Math.max(0, Math.min(1, heroRemaining / heroTargetSeconds)) : 0;
   const ringDashOffset = ringCircumference * (1 - ringProgress);
 
+  const displayEntries = selectedCategory === "Bodybuilding" ? visibleEntries : visibleEntries;
+
   return (
     <section className="flex flex-1 flex-col gap-4">
-      {activeTab === "lite" ? (
+      {activeTab === "lite" && hiddenLiteHero ? (
         <div className="overflow-hidden rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 via-orange-50 to-yellow-50 shadow-sm">
           <div className="relative h-64 w-full bg-rose-100 sm:h-72">
             <Image
@@ -1069,38 +1196,40 @@ export function RoutineJournal({
         </header>
       )}
 
-      <div className="flex gap-2 rounded-xl bg-slate-200 p-1">
-        <button
-          type="button"
-          onClick={() => {
-            setOverallStartedAtMs(null);
-            setActiveExerciseTimer(null);
-            setMorningFlowActive(false);
-            setMinuteAlertedExercise(null);
-            setActiveTab("cloud");
-          }}
-          className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
-            activeTab === "cloud" ? "bg-white text-teal-800 shadow" : "text-slate-800"
-          }`}
-        >
-          Cloud Journal
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setOverallStartedAtMs(null);
-            setActiveExerciseTimer(null);
-            setMorningFlowActive(false);
-            setMinuteAlertedExercise(null);
-            setActiveTab("lite");
-          }}
-          className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
-            activeTab === "lite" ? "bg-white text-teal-800 shadow" : "text-slate-800"
-          }`}
-        >
-          Offline Lite
-        </button>
-      </div>
+      {showOfflineCopyButton || activeTab === "lite" ? (
+        <div className="flex gap-2 rounded-xl bg-slate-200 p-1">
+          <button
+            type="button"
+            onClick={() => {
+              setOverallStartedAtMs(null);
+              setActiveExerciseTimer(null);
+              setMorningFlowActive(false);
+              setMinuteAlertedExercise(null);
+              setActiveTab("cloud");
+            }}
+            className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
+              activeTab === "cloud" ? "bg-white text-teal-800 shadow" : "text-slate-800"
+            }`}
+          >
+            Cloud Journal
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setOverallStartedAtMs(null);
+              setActiveExerciseTimer(null);
+              setMorningFlowActive(false);
+              setMinuteAlertedExercise(null);
+              setActiveTab("lite");
+            }}
+            className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
+              activeTab === "lite" ? "bg-white text-teal-800 shadow" : "text-slate-800"
+            }`}
+          >
+            Offline Kopie
+          </button>
+        </div>
+      ) : null}
 
       {showLiteLink ? (
         <p className="text-sm font-medium text-slate-700">
@@ -1111,7 +1240,7 @@ export function RoutineJournal({
         </p>
       ) : null}
 
-      <div className="rounded-xl border border-slate-300 bg-white p-4 shadow-sm">
+      <div className="w-full max-w-full overflow-x-hidden rounded-xl border border-slate-300 bg-white p-4 shadow-sm">
         <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
           <div className="flex items-center justify-between gap-2">
             <p className="text-sm font-bold uppercase tracking-[0.14em] text-slate-700">
@@ -1151,7 +1280,18 @@ export function RoutineJournal({
               </p>
               <div className="mt-2 grid grid-cols-7 gap-2">
                 {overviewStats.weekView.map((day) => (
-                  <div key={day.key} className="rounded-lg border border-slate-200 bg-white p-2 text-center">
+                  <button
+                    key={day.key}
+                    type="button"
+                    onClick={() => {
+                      setOverallStartedAtMs(null);
+                      setActiveExerciseTimer(null);
+                      setMorningFlowActive(false);
+                      setMinuteAlertedExercise(null);
+                      setSelectedDate(day.key);
+                    }}
+                    className="rounded-lg border border-slate-200 bg-white p-2 text-center transition hover:border-teal-400 hover:bg-teal-50"
+                  >
                     <div className="text-[10px] font-semibold uppercase text-slate-500">
                       {new Date(`${day.key}T00:00:00`).toLocaleDateString("de-DE", { weekday: "short" })}
                     </div>
@@ -1163,7 +1303,7 @@ export function RoutineJournal({
                       {day.done ? "✓" : "–"}
                     </div>
                     <div className="mt-1 text-[10px] font-semibold text-slate-500">{day.count}</div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>
@@ -1200,17 +1340,25 @@ export function RoutineJournal({
                 <div key={`empty-${index}`} />
               ))}
               {overviewStats.monthView.map((day) => (
-                <div
+                <button
                   key={day.key}
-                  className={`rounded-md border p-1 text-center text-[11px] font-semibold ${
+                  type="button"
+                  onClick={() => {
+                    setOverallStartedAtMs(null);
+                    setActiveExerciseTimer(null);
+                    setMorningFlowActive(false);
+                    setMinuteAlertedExercise(null);
+                    setSelectedDate(day.key);
+                  }}
+                  className={`rounded-md border p-1 text-center text-[11px] font-semibold transition ${
                     day.done
                       ? "border-emerald-300 bg-emerald-100 text-emerald-900"
-                      : "border-slate-200 bg-white text-slate-600"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-teal-400"
                   }`}
                 >
                   <div>{day.day}</div>
                   <div className="text-[10px]">{day.done ? "✓" : ""}</div>
-                </div>
+                </button>
               ))}
             </div>
           </div>
@@ -1232,6 +1380,23 @@ export function RoutineJournal({
               className="rounded-lg border border-slate-400 px-3 py-2 text-slate-900"
             />
           </label>
+
+          <div className="flex flex-col gap-1 text-sm font-medium text-slate-900">
+            <span>Heute</span>
+            <button
+              type="button"
+              onClick={() => {
+                setOverallStartedAtMs(null);
+                setActiveExerciseTimer(null);
+                setMorningFlowActive(false);
+                setMinuteAlertedExercise(null);
+                setSelectedDate(getTodayDateKey());
+              }}
+              className="rounded-lg border border-teal-500 bg-teal-50 px-3 py-2 font-semibold text-teal-800"
+            >
+              Today
+            </button>
+          </div>
 
           <label className="flex flex-col gap-1 text-sm font-medium text-slate-900 sm:col-span-2">
             Kategorie
@@ -1255,6 +1420,41 @@ export function RoutineJournal({
             </select>
           </label>
         </div>
+
+        {isBodybuilding ? (
+          <div className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50 p-3">
+            <label className="flex flex-col gap-1 text-sm font-medium text-indigo-900">
+              Trainingsplan
+              <select
+                value={bodybuildingPlan}
+                onChange={(event) => setBodybuildingPlan(event.target.value)}
+                className="rounded-lg border border-indigo-300 bg-white px-3 py-2 text-slate-900"
+              >
+                {Object.keys(bodybuildingPlanMap).map((plan) => (
+                  <option key={plan} value={plan}>
+                    {plan}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {bodybuildingMuscleGroups.map((group) => (
+                <button
+                  key={group}
+                  type="button"
+                  onClick={() => setBodybuildingMuscleFilter(group)}
+                  className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                    bodybuildingMuscleFilter === group
+                      ? "bg-indigo-700 text-white"
+                      : "border border-indigo-300 bg-white text-indigo-700"
+                  }`}
+                >
+                  {group}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         <div className="mt-4 rounded-lg bg-emerald-100 px-3 py-2 text-sm font-medium text-emerald-950">
           Tagesfortschritt: <strong>{completedCount}</strong> / {visibleEntries.length} erledigt (
@@ -1303,10 +1503,12 @@ export function RoutineJournal({
           </div>
         </div>
 
-        {isMorningRoutine ? (
+        {isMorningRoutine || isTabata ? (
           <div className="mt-4 rounded-xl border border-emerald-300 bg-emerald-50 p-3">
             <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-semibold text-emerald-950">Morning Flow</p>
+              <p className="text-sm font-semibold text-emerald-950">
+                {isTabata ? "Tabata Flow" : "Morning Flow"}
+              </p>
               <div className="flex gap-2">
                 {!morningFlowActive ? (
                   <button
@@ -1325,7 +1527,7 @@ export function RoutineJournal({
                       }
                       setMorningFlowActive(false);
                       setMinuteAlertedExercise(null);
-                      setStatusText("Morning Flow pausiert.");
+                      setStatusText(`${isTabata ? "Tabata" : "Morning"} Flow pausiert.`);
                     }}
                     className="rounded-lg border border-emerald-700 px-3 py-1.5 text-sm font-semibold text-emerald-900"
                   >
@@ -1716,104 +1918,186 @@ export function RoutineJournal({
         <div className="mt-4 grid gap-3">
           {loadingEntries ? (
             <p className="text-sm font-medium text-slate-700">Lade Cloud-Daten ...</p>
-          ) : isMorningRoutine ? null : (
-            visibleEntries.map((entry) => {
-              const timerRunning =
-                activeExerciseTimer?.exercise === entry.exercise ? activeExerciseTimer : null;
-              const liveTrackedSeconds =
-                entry.trackedSeconds +
-                (timerRunning ? Math.floor((nowMs - timerRunning.startedAtMs) / 1000) : 0);
+          ) : isMorningRoutine || isTabata ? null : (
+            <>
+              {isBodybuilding ? (
+                <div className="flex flex-wrap gap-2">
+                  {bodybuildingMuscleGroups.map((group) => (
+                    <button
+                      key={group}
+                      type="button"
+                      onClick={() => setBodybuildingMuscleFilter(group)}
+                      className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                        bodybuildingMuscleFilter === group
+                          ? "bg-indigo-700 text-white"
+                          : "border border-indigo-300 bg-white text-indigo-700"
+                      }`}
+                    >
+                      {group}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {displayEntries.map((entry) => {
+                const timerRunning =
+                  activeExerciseTimer?.exercise === entry.exercise ? activeExerciseTimer : null;
+                const liveTrackedSeconds =
+                  entry.trackedSeconds +
+                  (timerRunning ? Math.floor((nowMs - timerRunning.startedAtMs) / 1000) : 0);
 
-              return (
-                <article key={entry.exercise} className="rounded-xl border border-slate-300 p-3">
-                  <label className="flex items-start gap-2">
-                    <input
-                      type="checkbox"
-                      checked={entry.completed}
-                      onChange={(event) =>
-                        handleCompletedToggle(entry.exercise, event.target.checked)
-                      }
-                      className="mt-1 h-4 w-4"
-                    />
-                    <span className="text-sm font-semibold text-slate-900">{entry.exercise}</span>
-                  </label>
+                return (
+                  <article
+                    key={entry.exercise}
+                    className={`rounded-xl border p-3 ${
+                      activeExerciseTimer?.exercise === entry.exercise
+                        ? "border-indigo-400 bg-indigo-50"
+                        : "border-slate-300 bg-white"
+                    }`}
+                  >
+                    <label className="flex items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={entry.completed}
+                        onChange={(event) =>
+                          handleCompletedToggle(entry.exercise, event.target.checked)
+                        }
+                        className="mt-1 h-4 w-4"
+                      />
+                      <span className="text-sm font-semibold text-slate-900">{entry.exercise}</span>
+                    </label>
 
-                  <div className="mt-3 rounded-md bg-cyan-50 px-2 py-2">
-                    <p className="text-xs font-semibold text-cyan-900">
-                      Getrackte Zeit: {formatSeconds(liveTrackedSeconds)}
-                    </p>
-                    <div className="mt-1 flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={() => startExerciseTimer(entry.exercise)}
-                        className="rounded-md bg-cyan-700 px-2 py-1 text-xs font-semibold text-white"
-                      >
-                        Start
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => pauseExerciseTimer(entry.exercise)}
-                        className="rounded-md border border-cyan-700 px-2 py-1 text-xs font-semibold text-cyan-900"
-                      >
-                        Stop
-                      </button>
+                    <div className="mt-3 rounded-md bg-cyan-50 px-2 py-2">
+                      <p className="text-xs font-semibold text-cyan-900">
+                        Getrackte Zeit: {formatSeconds(liveTrackedSeconds)}
+                      </p>
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => startExerciseTimer(entry.exercise)}
+                          className="rounded-md bg-cyan-700 px-2 py-1 text-xs font-semibold text-white"
+                        >
+                          Start
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => pauseExerciseTimer(entry.exercise)}
+                          className="rounded-md border border-cyan-700 px-2 py-1 text-xs font-semibold text-cyan-900"
+                        >
+                          Stop
+                        </button>
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                    <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
-                      Zielzeit in Minuten (optional)
-                      <input
-                        type="number"
-                        min={0}
-                        value={entry.targetMinutes}
-                        onChange={(event) =>
-                          handleEntryChange(entry.exercise, { targetMinutes: event.target.value })
-                        }
-                        className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
-                      Wiederholungen (optional)
-                      <input
-                        type="number"
-                        min={0}
-                        value={entry.reps}
-                        onChange={(event) =>
-                          handleEntryChange(entry.exercise, { reps: event.target.value })
-                        }
-                        className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
-                      Dauer in Minuten (optional)
-                      <input
-                        type="number"
-                        min={0}
-                        value={entry.durationMinutes}
-                        onChange={(event) =>
-                          handleEntryChange(entry.exercise, {
-                            durationMinutes: event.target.value,
-                          })
-                        }
-                        className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 sm:col-span-3">
-                      Notiz (optional)
-                      <textarea
-                        value={entry.notes}
-                        onChange={(event) =>
-                          handleEntryChange(entry.exercise, { notes: event.target.value })
-                        }
-                        rows={2}
-                        className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
-                      />
-                    </label>
-                  </div>
-                </article>
-              );
-            })
+                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                      {isBodybuilding ? (
+                        <>
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                            Wiederholungen
+                            <input
+                              type="number"
+                              min={0}
+                              value={entry.reps}
+                              onChange={(event) =>
+                                handleEntryChange(entry.exercise, { reps: event.target.value })
+                              }
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                            Gewicht (kg)
+                            <input
+                              type="number"
+                              min={0}
+                              step="0.5"
+                              value={entry.weightKg}
+                              onChange={(event) =>
+                                handleEntryChange(entry.exercise, { weightKg: event.target.value })
+                              }
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                            Zielzeit (min)
+                            <input
+                              type="number"
+                              min={0}
+                              value={entry.targetMinutes}
+                              onChange={(event) =>
+                                handleEntryChange(entry.exercise, { targetMinutes: event.target.value })
+                              }
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 sm:col-span-3">
+                            Notiz
+                            <textarea
+                              value={entry.notes}
+                              onChange={(event) =>
+                                handleEntryChange(entry.exercise, { notes: event.target.value })
+                              }
+                              rows={2}
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                            />
+                          </label>
+                        </>
+                      ) : (
+                        <>
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                            Zielzeit in Minuten (optional)
+                            <input
+                              type="number"
+                              min={0}
+                              value={entry.targetMinutes}
+                              onChange={(event) =>
+                                handleEntryChange(entry.exercise, { targetMinutes: event.target.value })
+                              }
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                            Wiederholungen (optional)
+                            <input
+                              type="number"
+                              min={0}
+                              value={entry.reps}
+                              onChange={(event) =>
+                                handleEntryChange(entry.exercise, { reps: event.target.value })
+                              }
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                            Dauer in Minuten (optional)
+                            <input
+                              type="number"
+                              min={0}
+                              value={entry.durationMinutes}
+                              onChange={(event) =>
+                                handleEntryChange(entry.exercise, {
+                                  durationMinutes: event.target.value,
+                                })
+                              }
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 sm:col-span-3">
+                            Notiz (optional)
+                            <textarea
+                              value={entry.notes}
+                              onChange={(event) =>
+                                handleEntryChange(entry.exercise, { notes: event.target.value })
+                              }
+                              rows={2}
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                            />
+                          </label>
+                        </>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+            </>
           )}
         </div>
 
