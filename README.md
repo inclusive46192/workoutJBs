@@ -2,6 +2,7 @@
 
 Mobil-first Journal fuer Morgenroutine, HIT und Running/Cardio:
 - Cloud Journal mit Magic-Link Login
+- Cloud-Profil-Sync (Name, Ziel, Kategorien, Einheit, Reminder)
 - Offline Lite Modus ohne Login
 - Overall Timer + Start/Stop pro Uebung
 - Zielzeit pro Uebung

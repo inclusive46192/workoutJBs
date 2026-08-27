@@ -91,3 +91,43 @@ create policy "Users can delete own reflections"
   on public.daily_reflections
   for delete
   using (auth.uid() = user_id);
+
+create table if not exists public.user_profiles (
+  user_id uuid primary key references auth.users (id) on delete cascade,
+  display_name text not null default '',
+  goal text not null default '',
+  preferred_categories text[] not null default '{}',
+  weight_unit text not null default 'kg' check (weight_unit in ('kg', 'lbs')),
+  reminder_time text not null default '07:00',
+  updated_at timestamptz not null default now()
+);
+
+alter table public.user_profiles
+  add column if not exists preferred_categories text[] not null default '{}';
+
+alter table public.user_profiles
+  add column if not exists weight_unit text not null default 'kg';
+
+alter table public.user_profiles
+  add column if not exists reminder_time text not null default '07:00';
+
+alter table public.user_profiles enable row level security;
+
+drop policy if exists "Users can read own profile" on public.user_profiles;
+create policy "Users can read own profile"
+  on public.user_profiles
+  for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert own profile" on public.user_profiles;
+create policy "Users can insert own profile"
+  on public.user_profiles
+  for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can update own profile" on public.user_profiles;
+create policy "Users can update own profile"
+  on public.user_profiles
+  for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);

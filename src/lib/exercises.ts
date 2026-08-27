@@ -21,6 +21,9 @@ export const journalCategories: JournalCategory[] = [
       "Table top toe touch",
       "Hands behind back and head touch elbow plank",
       "Kneeling diagonal stretch",
+      "Journal Check-in",
+      "Kaffee & Wasser vorbereiten",
+      "Tagesfokus setzen",
     ],
   },
   {
