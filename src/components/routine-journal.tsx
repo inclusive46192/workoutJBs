@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import type { JournalCategory } from "@/lib/exercises";
 import { getSupabaseClient } from "@/lib/supabase";
@@ -16,10 +16,12 @@ type RoutineJournalProps = {
 };
 
 type JournalTab = "cloud" | "lite";
+type PageViewTab = "training" | "dashboard";
 
 type EntryState = {
   exercise: string;
   completed: boolean;
+  sets: string;
   reps: string;
   weightKg: string;
   durationMinutes: string;
@@ -59,6 +61,32 @@ type JournalArchiveEntry = {
   text: string;
 };
 
+type HitWorkoutSet = {
+  name: string;
+  items: Array<{ exercise: string; reps: string }>;
+};
+
+type CategoryFavorite = {
+  name: string;
+  category: string;
+  entries: EntryState[];
+  reflection: ReflectionState;
+  exerciseCustomSeconds: ExerciseSecondMap;
+  hitTargetRounds: number;
+};
+
+type BodybuildingPlan = {
+  name: string;
+  exercises: string[];
+};
+
+type WorkoutBuilderTemplate = {
+  name: string;
+  category: string;
+  entries: EntryState[];
+  exerciseCustomSeconds: ExerciseSecondMap;
+};
+
 const encouragement = [
   "Dranbleiben: 1% besser jeden Tag.",
   "Fokus, Atem, Bewegung - du bist im Flow.",
@@ -76,6 +104,10 @@ const moodTemplates: Record<string, string> = {
 const moodOptions = Object.keys(moodTemplates);
 const customExercisesStorageKey = "momentum-config:custom-exercises:v1";
 const hiddenExercisesStorageKey = "momentum-config:hidden-exercises:v1";
+const hitWorkoutSetsStorageKey = "momentum-hit:sets:v1";
+const favoritesByCategoryStorageKey = "momentum-favorites:by-category:v1";
+const bodybuildingPlansStorageKey = "momentum-bodybuilding:plans:v1";
+const workoutBuilderTemplatesStorageKey = "momentum-builder:templates:v1";
 const bodybuildingPlanMap: Record<string, string[]> = {
   "Push / Pull / Legs": [
     "Bench Press",
@@ -229,6 +261,7 @@ function buildDefaultEntries(exercises: string[]): EntryState[] {
   return exercises.map((exercise) => ({
     exercise,
     completed: false,
+    sets: "",
     reps: "",
     weightKg: "",
     durationMinutes: "",
@@ -252,6 +285,7 @@ function toEntryMap(rows: CloudRow[], exercises: string[]): EntryState[] {
     return {
       exercise,
       completed: row?.completed ?? false,
+      sets: "",
       reps: row?.reps?.toString() ?? "",
       weightKg: row?.weight_kg?.toString() ?? "",
       durationMinutes: row?.duration_minutes?.toString() ?? "",
@@ -276,6 +310,7 @@ function normalizeEntries(entries: Partial<EntryState>[], exercises: string[]): 
     return {
       exercise,
       completed: row?.completed ?? false,
+      sets: row?.sets ?? "",
       reps: row?.reps ?? "",
       weightKg: row?.weightKg ?? "",
       durationMinutes: row?.durationMinutes ?? "",
@@ -305,9 +340,9 @@ export function RoutineJournal({
   const supabaseReady = Boolean(supabase);
 
   const [activeTab, setActiveTab] = useState<JournalTab>(initialTab);
+  const [pageViewTab, setPageViewTab] = useState<PageViewTab>("training");
   const [selectedCategory, setSelectedCategory] = useState(categories[0]?.name ?? "");
   const [selectedDate, setSelectedDate] = useState(getTodayDateKey());
-  const [bodybuildingPlan, setBodybuildingPlan] = useState("Push / Pull / Legs");
   const [entries, setEntries] = useState<EntryState[]>(() =>
     buildDefaultEntries(categories[0]?.exercises ?? []),
   );
@@ -369,6 +404,30 @@ export function RoutineJournal({
   const [bodybuildingMuscleFilter, setBodybuildingMuscleFilter] = useState<(typeof bodybuildingMuscleGroups)[number]>('Alle');
   const [journalArchive, setJournalArchive] = useState<JournalArchiveEntry[]>([]);
   const [expandedArchiveKeys, setExpandedArchiveKeys] = useState<Set<string>>(new Set());
+  const [hitWorkoutSets, setHitWorkoutSets] = useState<HitWorkoutSet[]>([]);
+  const [newHitSetName, setNewHitSetName] = useState("");
+  const [selectedHitSetName, setSelectedHitSetName] = useState("");
+  const [hitTargetRounds, setHitTargetRounds] = useState(3);
+  const [hitCurrentRound, setHitCurrentRound] = useState(1);
+  const [favoritesByCategory, setFavoritesByCategory] = useState<Record<string, CategoryFavorite[]>>(
+    {},
+  );
+  const [newFavoriteName, setNewFavoriteName] = useState("");
+  const [selectedFavoriteName, setSelectedFavoriteName] = useState("");
+  const [bodybuildingPlans, setBodybuildingPlans] = useState<BodybuildingPlan[]>([]);
+  const [newBodybuildingPlanName, setNewBodybuildingPlanName] = useState("");
+  const [selectedBodybuildingPlanName, setSelectedBodybuildingPlanName] = useState("");
+  const [selectedBodybuildingPlanExercises, setSelectedBodybuildingPlanExercises] = useState<
+    string[]
+  >([]);
+  const [bodybuildingFlowActive, setBodybuildingFlowActive] = useState(false);
+  const [bodybuildingFocusExercise, setBodybuildingFocusExercise] = useState<string | null>(null);
+  const [workoutBuilderTemplates, setWorkoutBuilderTemplates] = useState<
+    Record<string, WorkoutBuilderTemplate[]>
+  >({});
+  const [workoutBuilderName, setWorkoutBuilderName] = useState("");
+  const [selectedWorkoutBuilderName, setSelectedWorkoutBuilderName] = useState("");
+  const offlineImportRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const tick = window.setInterval(() => {
@@ -390,6 +449,57 @@ export function RoutineJournal({
       // ignore
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const rawSets = localStorage.getItem(hitWorkoutSetsStorageKey);
+    if (rawSets) {
+      try {
+        setHitWorkoutSets(JSON.parse(rawSets) as HitWorkoutSet[]);
+      } catch (error) {
+        setErrorText(`HIT-Sets konnten nicht geladen werden: ${String(error)}`);
+      }
+    }
+
+    const rawFavorites = localStorage.getItem(favoritesByCategoryStorageKey);
+    if (rawFavorites) {
+      try {
+        setFavoritesByCategory(JSON.parse(rawFavorites) as Record<string, CategoryFavorite[]>);
+      } catch (error) {
+        setErrorText(`Favoriten konnten nicht geladen werden: ${String(error)}`);
+      }
+    }
+
+    const rawBodyPlans = localStorage.getItem(bodybuildingPlansStorageKey);
+    if (rawBodyPlans) {
+      try {
+        setBodybuildingPlans(JSON.parse(rawBodyPlans) as BodybuildingPlan[]);
+      } catch (error) {
+        setErrorText(`Bodybuilding-Pläne konnten nicht geladen werden: ${String(error)}`);
+      }
+    }
+
+    const rawWorkoutBuilders = localStorage.getItem(workoutBuilderTemplatesStorageKey);
+    if (rawWorkoutBuilders) {
+      try {
+        setWorkoutBuilderTemplates(
+          JSON.parse(rawWorkoutBuilders) as Record<string, WorkoutBuilderTemplate[]>,
+        );
+      } catch (error) {
+        setErrorText(`Workout-Builder konnten nicht geladen werden: ${String(error)}`);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (hitCurrentRound > hitTargetRounds) {
+      setHitCurrentRound(hitTargetRounds);
+    }
+  }, [hitCurrentRound, hitTargetRounds]);
+
 
   const overviewStats = useMemo(() => {
     if (typeof window === "undefined") {
@@ -534,6 +644,7 @@ export function RoutineJournal({
         map.get(exercise) ?? {
           exercise,
           completed: false,
+          sets: "",
           reps: "",
           weightKg: "",
           durationMinutes: "",
@@ -544,9 +655,28 @@ export function RoutineJournal({
     );
   }, [activeExercises, entries, filteredBodybuildingExercises, selectedCategory]);
 
+  const builderEntries = useMemo(() => {
+    const byExercise = new Map(entries.map((entry) => [entry.exercise, entry]));
+    return allExercisesForCategory.map(
+      (exercise) =>
+        byExercise.get(exercise) ?? {
+          exercise,
+          completed: false,
+          sets: "",
+          reps: "",
+          weightKg: "",
+          durationMinutes: "",
+          targetMinutes: "",
+          trackedSeconds: 0,
+          notes: "",
+        },
+    );
+  }, [allExercisesForCategory, entries]);
+
   const completedCount = visibleEntries.filter((entry) => entry.completed).length;
   const isMorningRoutine = selectedCategory === "Morning Routine";
   const isTabata = selectedCategory === "Tabata";
+  const isHitWorkout = selectedCategory === "HIT Workouts";
   const isBodybuilding = selectedCategory === "Bodybuilding";
   const isFlowCategory = isMorningRoutine || isTabata;
   const completionPercent =
@@ -557,6 +687,19 @@ export function RoutineJournal({
   const overallLiveSeconds =
     overallBaseSeconds +
     (overallStartedAtMs ? Math.floor((nowMs - overallStartedAtMs) / 1000) : 0);
+
+  useEffect(() => {
+    if (!isBodybuilding) {
+      return;
+    }
+
+    setSelectedBodybuildingPlanExercises((current) => {
+      if (current.length === 0) {
+        return activeExercises;
+      }
+      return current.filter((exercise) => activeExercises.includes(exercise));
+    });
+  }, [activeExercises, isBodybuilding]);
 
   useEffect(() => {
     if (activeTab !== "cloud") {
@@ -600,7 +743,7 @@ export function RoutineJournal({
       const selectWithTimers = await supabase
         .from("daily_entries")
         .select(
-          "exercise,completed,reps,duration_minutes,target_minutes,tracked_seconds,notes",
+          "exercise,completed,reps,weight_kg,duration_minutes,target_minutes,tracked_seconds,notes",
         )
         .eq("user_id", session.user.id)
         .eq("entry_date", selectedDate)
@@ -610,6 +753,7 @@ export function RoutineJournal({
       let error = selectWithTimers.error;
 
       if (
+        error?.message.includes("weight_kg") ||
         error?.message.includes("target_minutes") ||
         error?.message.includes("tracked_seconds")
       ) {
@@ -793,6 +937,17 @@ export function RoutineJournal({
   const handleCompletedToggle = (exercise: string, checked: boolean) => {
     handleEntryChange(exercise, { completed: checked });
 
+    if (isBodybuilding && checked && bodybuildingFlowActive) {
+      const currentIndex = visibleEntries.findIndex((entry) => entry.exercise === exercise);
+      const nextEntry = visibleEntries.slice(currentIndex + 1).find((entry) => !entry.completed);
+      setBodybuildingFocusExercise(nextEntry?.exercise ?? null);
+      if (!nextEntry) {
+        setBodybuildingFlowActive(false);
+        setStatusText("Bodybuilding Session abgeschlossen - stark!");
+      }
+      return;
+    }
+
     if (!checked || !isFlowCategory || !morningFlowActive) {
       return;
     }
@@ -866,6 +1021,7 @@ export function RoutineJournal({
       {
         exercise: trimmed,
         completed: false,
+        sets: "",
         reps: "",
         weightKg: "",
         durationMinutes: "",
@@ -893,6 +1049,542 @@ export function RoutineJournal({
       return next;
     });
     setEntries((current) => current.filter((entry) => entry.exercise !== exercise));
+  };
+
+  const saveBodybuildingPlan = () => {
+    if (!isBodybuilding) {
+      setErrorText("Trainingspläne sind nur in Bodybuilding verfügbar.");
+      return;
+    }
+    const trimmed = newBodybuildingPlanName.trim();
+    if (!trimmed) {
+      setErrorText("Bitte einen Namen für den Trainingsplan eingeben.");
+      return;
+    }
+    if (selectedBodybuildingPlanExercises.length === 0) {
+      setErrorText("Bitte mindestens eine Übung für den Trainingsplan wählen.");
+      return;
+    }
+
+    const nextPlan: BodybuildingPlan = {
+      name: trimmed,
+      exercises: selectedBodybuildingPlanExercises,
+    };
+    setBodybuildingPlans((current) => {
+      const next = [...current.filter((plan) => plan.name !== trimmed), nextPlan];
+      localStorage.setItem(bodybuildingPlansStorageKey, JSON.stringify(next));
+      return next;
+    });
+    setSelectedBodybuildingPlanName(trimmed);
+    setStatusText(`Trainingsplan "${trimmed}" gespeichert.`);
+    setErrorText("");
+  };
+
+  const loadBodybuildingPlan = () => {
+    if (!isBodybuilding) {
+      setErrorText("Trainingspläne sind nur in Bodybuilding verfügbar.");
+      return;
+    }
+    const plan = bodybuildingPlans.find((item) => item.name === selectedBodybuildingPlanName);
+    if (!plan) {
+      setErrorText("Bitte zuerst einen Trainingsplan auswählen.");
+      return;
+    }
+
+    const missingExercises = plan.exercises.filter(
+      (exercise) => !allExercisesForCategory.includes(exercise),
+    );
+    if (missingExercises.length > 0) {
+      setCustomExercisesByCategory((current) => {
+        const existing = current[selectedCategory] ?? [];
+        const next = {
+          ...current,
+          [selectedCategory]: Array.from(new Set([...existing, ...missingExercises])),
+        };
+        localStorage.setItem(customExercisesStorageKey, JSON.stringify(next));
+        return next;
+      });
+    }
+
+    setSelectedBodybuildingPlanExercises(plan.exercises);
+    const planSet = new Set(plan.exercises);
+    setHiddenExercisesByCategory((current) => {
+      const nextHidden = allExercisesForCategory.filter((exercise) => !planSet.has(exercise));
+      const next = { ...current, [selectedCategory]: nextHidden };
+      localStorage.setItem(hiddenExercisesStorageKey, JSON.stringify(next));
+      return next;
+    });
+    setStatusText(`Trainingsplan "${plan.name}" geladen.`);
+    setErrorText("");
+  };
+
+  const toggleBodybuildingPlanExercise = (exercise: string) => {
+    setSelectedBodybuildingPlanExercises((current) =>
+      current.includes(exercise)
+        ? current.filter((item) => item !== exercise)
+        : [...current, exercise],
+    );
+  };
+
+  const applyBodybuildingSelection = () => {
+    if (!isBodybuilding) {
+      return;
+    }
+    if (selectedBodybuildingPlanExercises.length === 0) {
+      setErrorText("Bitte mindestens eine Übung auswählen.");
+      return;
+    }
+    const selectedSet = new Set(selectedBodybuildingPlanExercises);
+    setHiddenExercisesByCategory((current) => {
+      const nextHidden = allExercisesForCategory.filter((exercise) => !selectedSet.has(exercise));
+      const next = { ...current, [selectedCategory]: nextHidden };
+      localStorage.setItem(hiddenExercisesStorageKey, JSON.stringify(next));
+      return next;
+    });
+    setStatusText("Übungsauswahl für Bodybuilding angewendet.");
+    setErrorText("");
+  };
+
+  const startBodybuildingFlow = () => {
+    if (!isBodybuilding || visibleEntries.length === 0) {
+      setErrorText("Bodybuilding-Flow braucht mindestens eine aktive Übung.");
+      return;
+    }
+    const firstExercise = visibleEntries.find((entry) => !entry.completed)?.exercise ?? visibleEntries[0].exercise;
+    setBodybuildingFlowActive(true);
+    setBodybuildingFocusExercise(firstExercise);
+    setStatusText(`Bodybuilding gestartet mit: ${firstExercise}`);
+    setErrorText("");
+  };
+
+  const completeBodybuildingAndNext = (exercise: string) => {
+    handleEntryChange(exercise, { completed: true });
+    const currentIndex = visibleEntries.findIndex((entry) => entry.exercise === exercise);
+    const nextEntry = visibleEntries.slice(currentIndex + 1).find((entry) => !entry.completed);
+    setBodybuildingFocusExercise(nextEntry?.exercise ?? null);
+    if (!nextEntry) {
+      setBodybuildingFlowActive(false);
+      setStatusText("Bodybuilding Session abgeschlossen - stark!");
+    } else {
+      setStatusText(`Weiter mit: ${nextEntry.exercise}`);
+    }
+  };
+
+  const toggleBuilderExercise = (exercise: string, enabled: boolean) => {
+    setHiddenExercisesByCategory((current) => {
+      const currentSet = new Set(current[selectedCategory] ?? []);
+      if (enabled) {
+        currentSet.delete(exercise);
+      } else {
+        currentSet.add(exercise);
+      }
+      const next = { ...current, [selectedCategory]: Array.from(currentSet) };
+      localStorage.setItem(hiddenExercisesStorageKey, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const saveWorkoutBuilderTemplate = () => {
+    const trimmed = workoutBuilderName.trim();
+    if (!trimmed) {
+      setErrorText("Bitte einen Namen für den Workout-Builder eingeben.");
+      return;
+    }
+
+    const selectedEntries = builderEntries.filter((entry) => !hiddenExercises.includes(entry.exercise));
+    if (selectedEntries.length === 0) {
+      setErrorText("Bitte mindestens eine Übung im Workout-Builder aktivieren.");
+      return;
+    }
+
+    const template: WorkoutBuilderTemplate = {
+      name: trimmed,
+      category: selectedCategory,
+      entries: selectedEntries,
+      exerciseCustomSeconds,
+    };
+
+    setWorkoutBuilderTemplates((current) => {
+      const categoryTemplates = current[selectedCategory] ?? [];
+      const nextCategory = [
+        ...categoryTemplates.filter((item) => item.name !== trimmed),
+        template,
+      ];
+      const next = { ...current, [selectedCategory]: nextCategory };
+      localStorage.setItem(workoutBuilderTemplatesStorageKey, JSON.stringify(next));
+      return next;
+    });
+    setSelectedWorkoutBuilderName(trimmed);
+    setStatusText(`Workout-Builder "${trimmed}" gespeichert.`);
+    setErrorText("");
+  };
+
+  const loadWorkoutBuilderTemplate = () => {
+    const template = (workoutBuilderTemplates[selectedCategory] ?? []).find(
+      (item) => item.name === selectedWorkoutBuilderName,
+    );
+    if (!template) {
+      setErrorText("Bitte zuerst einen Workout-Builder auswählen.");
+      return;
+    }
+
+    const templateSet = new Set(template.entries.map((entry) => entry.exercise));
+    setHiddenExercisesByCategory((current) => {
+      const nextHidden = allExercisesForCategory.filter((exercise) => !templateSet.has(exercise));
+      const next = { ...current, [selectedCategory]: nextHidden };
+      localStorage.setItem(hiddenExercisesStorageKey, JSON.stringify(next));
+      return next;
+    });
+
+    setEntries((current) => {
+      const byExercise = new Map(current.map((entry) => [entry.exercise, entry]));
+      for (const entry of template.entries) {
+        byExercise.set(entry.exercise, entry);
+      }
+      return Array.from(byExercise.values());
+    });
+    setExerciseCustomSeconds(template.exerciseCustomSeconds ?? {});
+    if (selectedCategory === "Bodybuilding") {
+      setSelectedBodybuildingPlanExercises(template.entries.map((entry) => entry.exercise));
+      setBodybuildingFlowActive(false);
+      setBodybuildingFocusExercise(null);
+    }
+    if (selectedCategory === "HIT Workouts") {
+      setHitCurrentRound(1);
+    }
+    setStatusText(`Workout-Builder "${template.name}" geladen.`);
+    setErrorText("");
+  };
+
+  const completeHitRound = () => {
+    if (!isHitWorkout) {
+      setErrorText("Rundenabschluss ist nur in HIT Workouts verfügbar.");
+      return;
+    }
+
+    if (visibleEntries.length === 0) {
+      setErrorText("Keine aktiven HIT-Übungen vorhanden.");
+      return;
+    }
+
+    const allDone = visibleEntries.every((entry) => entry.completed);
+    if (!allDone) {
+      setErrorText("Bitte zuerst alle Übungen dieser Runde mit Done abhaken.");
+      return;
+    }
+
+    if (hitCurrentRound >= hitTargetRounds) {
+      setStatusText(`HIT abgeschlossen: ${hitTargetRounds}/${hitTargetRounds} Runden geschafft.`);
+      setErrorText("");
+      return;
+    }
+
+    const visibleNames = new Set(visibleEntries.map((entry) => entry.exercise));
+    setEntries((current) =>
+      current.map((entry) =>
+        visibleNames.has(entry.exercise) ? { ...entry, completed: false } : entry,
+      ),
+    );
+    setHitCurrentRound((current) => current + 1);
+    setStatusText(`Runde ${hitCurrentRound} erledigt. Starte Runde ${hitCurrentRound + 1}.`);
+    setErrorText("");
+  };
+
+  const saveHitWorkoutSet = () => {
+    if (!isHitWorkout) {
+      setErrorText("Workout-Sets können nur in HIT Workouts gespeichert werden.");
+      return;
+    }
+
+    const trimmed = newHitSetName.trim();
+    if (!trimmed) {
+      setErrorText("Bitte einen Namen für das HIT-Set eingeben.");
+      return;
+    }
+
+    const items = visibleEntries.map((entry) => ({
+      exercise: entry.exercise,
+      reps: entry.reps.trim() || "0",
+    }));
+    const filteredItems = items.filter((item) => item.exercise.trim().length > 0);
+    if (filteredItems.length === 0) {
+      setErrorText("Für das HIT-Set wurden keine Übungen gefunden.");
+      return;
+    }
+
+    setHitWorkoutSets((current) => {
+      const next = [
+        ...current.filter((setItem) => setItem.name !== trimmed),
+        { name: trimmed, items: filteredItems },
+      ];
+      localStorage.setItem(hitWorkoutSetsStorageKey, JSON.stringify(next));
+      return next;
+    });
+    setSelectedHitSetName(trimmed);
+    setStatusText(`HIT-Set "${trimmed}" gespeichert.`);
+    setErrorText("");
+  };
+
+  const loadHitWorkoutSet = () => {
+    if (!isHitWorkout) {
+      setErrorText("Workout-Sets können nur in HIT Workouts geladen werden.");
+      return;
+    }
+
+    const setToLoad = hitWorkoutSets.find((setItem) => setItem.name === selectedHitSetName);
+    if (!setToLoad) {
+      setErrorText("Bitte zuerst ein HIT-Set auswählen.");
+      return;
+    }
+
+    const missingExercises = setToLoad.items
+      .map((item) => item.exercise)
+      .filter((exercise) => !allExercisesForCategory.includes(exercise));
+
+    if (missingExercises.length > 0) {
+      setCustomExercisesByCategory((current) => {
+        const existing = current[selectedCategory] ?? [];
+        const next = {
+          ...current,
+          [selectedCategory]: Array.from(new Set([...existing, ...missingExercises])),
+        };
+        localStorage.setItem(customExercisesStorageKey, JSON.stringify(next));
+        return next;
+      });
+    }
+
+    setHiddenExercisesByCategory((current) => {
+      const currentSet = new Set(current[selectedCategory] ?? []);
+      for (const item of setToLoad.items) {
+        currentSet.delete(item.exercise);
+      }
+      const next = { ...current, [selectedCategory]: Array.from(currentSet) };
+      localStorage.setItem(hiddenExercisesStorageKey, JSON.stringify(next));
+      return next;
+    });
+
+    setEntries((current) => {
+      const byExercise = new Map(current.map((entry) => [entry.exercise, entry]));
+      for (const item of setToLoad.items) {
+        const existing = byExercise.get(item.exercise);
+        byExercise.set(item.exercise, {
+          exercise: item.exercise,
+          completed: false,
+          sets: existing?.sets ?? "",
+          reps: item.reps,
+          weightKg: existing?.weightKg ?? "",
+          durationMinutes: existing?.durationMinutes ?? "",
+          targetMinutes: existing?.targetMinutes ?? "",
+          trackedSeconds: existing?.trackedSeconds ?? 0,
+          notes: existing?.notes ?? "",
+        });
+      }
+      return Array.from(byExercise.values());
+    });
+
+    setHitCurrentRound(1);
+    setStatusText(`HIT-Set "${setToLoad.name}" geladen.`);
+    setErrorText("");
+  };
+
+  const saveCategoryFavorite = () => {
+    const trimmed = newFavoriteName.trim();
+    if (!trimmed) {
+      setErrorText("Bitte einen Namen für den Favoriten eingeben.");
+      return;
+    }
+
+    const favorite: CategoryFavorite = {
+      name: trimmed,
+      category: selectedCategory,
+      entries: visibleEntries,
+      reflection,
+      exerciseCustomSeconds,
+      hitTargetRounds,
+    };
+
+    setFavoritesByCategory((current) => {
+      const categoryItems = current[selectedCategory] ?? [];
+      const nextCategoryItems = [
+        ...categoryItems.filter((item) => item.name !== trimmed),
+        favorite,
+      ];
+      const next = { ...current, [selectedCategory]: nextCategoryItems };
+      localStorage.setItem(favoritesByCategoryStorageKey, JSON.stringify(next));
+      return next;
+    });
+    setSelectedFavoriteName(trimmed);
+    setStatusText(`Favorit "${trimmed}" gespeichert.`);
+    setErrorText("");
+  };
+
+  const loadCategoryFavorite = () => {
+    const favorite = (favoritesByCategory[selectedCategory] ?? []).find(
+      (item) => item.name === selectedFavoriteName,
+    );
+    if (!favorite) {
+      setErrorText("Bitte zuerst einen Favoriten auswählen.");
+      return;
+    }
+
+    const missingExercises = favorite.entries
+      .map((entry) => entry.exercise)
+      .filter((exercise) => !allExercisesForCategory.includes(exercise));
+
+    if (missingExercises.length > 0) {
+      setCustomExercisesByCategory((current) => {
+        const existing = current[selectedCategory] ?? [];
+        const next = {
+          ...current,
+          [selectedCategory]: Array.from(new Set([...existing, ...missingExercises])),
+        };
+        localStorage.setItem(customExercisesStorageKey, JSON.stringify(next));
+        return next;
+      });
+    }
+
+    setEntries((current) => {
+      const byExercise = new Map(current.map((entry) => [entry.exercise, entry]));
+      for (const entry of favorite.entries) {
+        byExercise.set(entry.exercise, entry);
+      }
+      return Array.from(byExercise.values());
+    });
+    setReflection(favorite.reflection);
+    setExerciseCustomSeconds(favorite.exerciseCustomSeconds);
+    setHitTargetRounds(favorite.hitTargetRounds || 3);
+    setHitCurrentRound(1);
+    if (selectedCategory === "Bodybuilding") {
+      setSelectedBodybuildingPlanExercises(favorite.entries.map((entry) => entry.exercise));
+    }
+    setBodybuildingFlowActive(false);
+    setBodybuildingFocusExercise(null);
+    setStatusText(`Favorit "${favorite.name}" geladen.`);
+    setErrorText("");
+  };
+
+  const exportOfflineData = () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const key = localStorageKey(selectedDate, selectedCategory);
+    const payload: LiteDayPayload = {
+      entries: visibleEntries,
+      reflection,
+      overallSeconds: overallLiveSeconds,
+    };
+    const liteRecords: Record<string, string> = {};
+    for (const storageKey of Object.keys(localStorage)) {
+      if (storageKey.startsWith("momentum-lite:")) {
+        const value = localStorage.getItem(storageKey);
+        if (value) {
+          liteRecords[storageKey] = value;
+        }
+      }
+    }
+
+    const bundle = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      selectedDate,
+      selectedCategory,
+      currentKey: key,
+      currentPayload: payload,
+      liteRecords,
+      hitWorkoutSets,
+      favoritesByCategory,
+      bodybuildingPlans,
+      workoutBuilderTemplates,
+    };
+
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+      type: "application/json;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `momentum-offline-${selectedDate}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setStatusText("Offline-Daten exportiert.");
+    setErrorText("");
+  };
+
+  const triggerOfflineImport = () => {
+    offlineImportRef.current?.click();
+  };
+
+  const handleOfflineImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as {
+        selectedDate?: string;
+        selectedCategory?: string;
+        currentPayload?: LiteDayPayload;
+        liteRecords?: Record<string, string>;
+        hitWorkoutSets?: HitWorkoutSet[];
+        favoritesByCategory?: Record<string, CategoryFavorite[]>;
+        bodybuildingPlans?: BodybuildingPlan[];
+        workoutBuilderTemplates?: Record<string, WorkoutBuilderTemplate[]>;
+      };
+
+      if (parsed.liteRecords) {
+        for (const [storageKey, value] of Object.entries(parsed.liteRecords)) {
+          localStorage.setItem(storageKey, value);
+        }
+      }
+
+      if (parsed.hitWorkoutSets) {
+        setHitWorkoutSets(parsed.hitWorkoutSets);
+        localStorage.setItem(hitWorkoutSetsStorageKey, JSON.stringify(parsed.hitWorkoutSets));
+      }
+
+      if (parsed.favoritesByCategory) {
+        setFavoritesByCategory(parsed.favoritesByCategory);
+        localStorage.setItem(
+          favoritesByCategoryStorageKey,
+          JSON.stringify(parsed.favoritesByCategory),
+        );
+      }
+
+      if (parsed.bodybuildingPlans) {
+        setBodybuildingPlans(parsed.bodybuildingPlans);
+        localStorage.setItem(bodybuildingPlansStorageKey, JSON.stringify(parsed.bodybuildingPlans));
+      }
+
+      if (parsed.workoutBuilderTemplates) {
+        setWorkoutBuilderTemplates(parsed.workoutBuilderTemplates);
+        localStorage.setItem(
+          workoutBuilderTemplatesStorageKey,
+          JSON.stringify(parsed.workoutBuilderTemplates),
+        );
+      }
+
+      if (parsed.selectedDate) {
+        setSelectedDate(parsed.selectedDate);
+      }
+      if (parsed.selectedCategory) {
+        setSelectedCategory(parsed.selectedCategory);
+      }
+
+      if (parsed.currentPayload) {
+        setEntries(normalizeEntries(parsed.currentPayload.entries ?? [], activeExercises));
+        setReflection(parsed.currentPayload.reflection ?? buildDefaultReflection());
+        setOverallBaseSeconds(parsed.currentPayload.overallSeconds ?? 0);
+      }
+
+      setStatusText("Offline-Daten geladen.");
+      setErrorText("");
+    } catch (error) {
+      setErrorText(`Import fehlgeschlagen: ${String(error)}`);
+    } finally {
+      event.target.value = "";
+    }
   };
 
   const sendMagicLink = async () => {
@@ -998,6 +1690,7 @@ export function RoutineJournal({
       .upsert(payloadWithTimers, { onConflict: "user_id,entry_date,category,exercise" });
 
     if (
+      upsertResult.error?.message.includes("weight_kg") ||
       upsertResult.error?.message.includes("target_minutes") ||
       upsertResult.error?.message.includes("tracked_seconds")
     ) {
@@ -1008,7 +1701,6 @@ export function RoutineJournal({
         exercise: entry.exercise,
         completed: entry.completed,
         reps: parsePositiveInt(entry.reps),
-        weight_kg: parsePositiveInt(entry.weightKg),
         duration_minutes: parsePositiveInt(entry.durationMinutes),
         notes: entry.notes.trim() || null,
       }));
@@ -1158,7 +1850,19 @@ export function RoutineJournal({
     heroTargetSeconds > 0 ? Math.max(0, Math.min(1, heroRemaining / heroTargetSeconds)) : 0;
   const ringDashOffset = ringCircumference * (1 - ringProgress);
 
-  const displayEntries = selectedCategory === "Bodybuilding" ? visibleEntries : visibleEntries;
+  const displayEntries = useMemo(() => {
+    if (!isBodybuilding || !bodybuildingFocusExercise) {
+      return visibleEntries;
+    }
+    const focused = visibleEntries.find((entry) => entry.exercise === bodybuildingFocusExercise);
+    if (!focused) {
+      return visibleEntries;
+    }
+    return [
+      focused,
+      ...visibleEntries.filter((entry) => entry.exercise !== bodybuildingFocusExercise),
+    ];
+  }, [bodybuildingFocusExercise, isBodybuilding, visibleEntries]);
 
   return (
     <section className="flex flex-1 flex-col gap-4">
@@ -1240,7 +1944,29 @@ export function RoutineJournal({
         </p>
       ) : null}
 
+      <div className="flex gap-2 rounded-xl bg-slate-200 p-1">
+        <button
+          type="button"
+          onClick={() => setPageViewTab("training")}
+          className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
+            pageViewTab === "training" ? "bg-white text-teal-800 shadow" : "text-slate-800"
+          }`}
+        >
+          Übungen
+        </button>
+        <button
+          type="button"
+          onClick={() => setPageViewTab("dashboard")}
+          className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
+            pageViewTab === "dashboard" ? "bg-white text-teal-800 shadow" : "text-slate-800"
+          }`}
+        >
+          Dashboard
+        </button>
+      </div>
+
       <div className="w-full max-w-full overflow-x-hidden rounded-xl border border-slate-300 bg-white p-4 shadow-sm">
+        {pageViewTab === "dashboard" ? (
         <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
           <div className="flex items-center justify-between gap-2">
             <p className="text-sm font-bold uppercase tracking-[0.14em] text-slate-700">
@@ -1288,6 +2014,8 @@ export function RoutineJournal({
                       setActiveExerciseTimer(null);
                       setMorningFlowActive(false);
                       setMinuteAlertedExercise(null);
+                      setBodybuildingFlowActive(false);
+                      setBodybuildingFocusExercise(null);
                       setSelectedDate(day.key);
                     }}
                     className="rounded-lg border border-slate-200 bg-white p-2 text-center transition hover:border-teal-400 hover:bg-teal-50"
@@ -1348,6 +2076,8 @@ export function RoutineJournal({
                     setActiveExerciseTimer(null);
                     setMorningFlowActive(false);
                     setMinuteAlertedExercise(null);
+                    setBodybuildingFlowActive(false);
+                    setBodybuildingFocusExercise(null);
                     setSelectedDate(day.key);
                   }}
                   className={`rounded-md border p-1 text-center text-[11px] font-semibold transition ${
@@ -1364,6 +2094,10 @@ export function RoutineJournal({
           </div>
         </div>
 
+        ) : null}
+
+        {pageViewTab === "training" ? (
+        <>
         <div className="grid gap-3 sm:grid-cols-3">
           <label className="flex flex-col gap-1 text-sm font-medium text-slate-900">
             Datum
@@ -1375,6 +2109,9 @@ export function RoutineJournal({
                 setActiveExerciseTimer(null);
                 setMorningFlowActive(false);
                 setMinuteAlertedExercise(null);
+                setHitCurrentRound(1);
+                setBodybuildingFlowActive(false);
+                setBodybuildingFocusExercise(null);
                 setSelectedDate(event.target.value);
               }}
               className="rounded-lg border border-slate-400 px-3 py-2 text-slate-900"
@@ -1390,6 +2127,9 @@ export function RoutineJournal({
                 setActiveExerciseTimer(null);
                 setMorningFlowActive(false);
                 setMinuteAlertedExercise(null);
+                setHitCurrentRound(1);
+                setBodybuildingFlowActive(false);
+                setBodybuildingFocusExercise(null);
                 setSelectedDate(getTodayDateKey());
               }}
               className="rounded-lg border border-teal-500 bg-teal-50 px-3 py-2 font-semibold text-teal-800"
@@ -1408,6 +2148,9 @@ export function RoutineJournal({
                 setActiveExerciseTimer(null);
                 setMorningFlowActive(false);
                 setMinuteAlertedExercise(null);
+                setHitCurrentRound(1);
+                setBodybuildingFlowActive(false);
+                setBodybuildingFocusExercise(null);
                 setSelectedCategory(nextCategory);
               }}
               className="rounded-lg border border-slate-400 px-3 py-2 text-slate-900"
@@ -1421,22 +2164,247 @@ export function RoutineJournal({
           </label>
         </div>
 
+        <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50 p-3">
+          <p className="text-sm font-semibold text-teal-900">
+            Workout Builder ({selectedCategory})
+          </p>
+          <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+            <input
+              value={workoutBuilderName}
+              onChange={(event) => setWorkoutBuilderName(event.target.value)}
+              placeholder="Name für Builder-Template"
+              className="rounded-md border border-teal-300 bg-white px-3 py-2 text-sm text-slate-900"
+            />
+            <button
+              type="button"
+              onClick={saveWorkoutBuilderTemplate}
+              className="rounded-lg bg-teal-700 px-3 py-2 text-sm font-semibold text-white"
+            >
+              Builder speichern
+            </button>
+          </div>
+          <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+            <select
+              value={selectedWorkoutBuilderName}
+              onChange={(event) => setSelectedWorkoutBuilderName(event.target.value)}
+              className="rounded-md border border-teal-300 bg-white px-3 py-2 text-sm text-slate-900"
+            >
+              <option value="">Builder-Template wählen</option>
+              {(workoutBuilderTemplates[selectedCategory] ?? []).map((template) => (
+                <option key={`${template.category}-${template.name}`} value={template.name}>
+                  {template.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={loadWorkoutBuilderTemplate}
+              className="rounded-lg border border-teal-700 px-3 py-2 text-sm font-semibold text-teal-800"
+            >
+              Builder laden
+            </button>
+          </div>
+          <div className="mt-3 grid gap-2">
+            {builderEntries.map((entry) => {
+              const enabled = !hiddenExercises.includes(entry.exercise);
+              return (
+                <div
+                  key={`builder-${entry.exercise}`}
+                  className="rounded-md border border-teal-200 bg-white p-2"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                      <input
+                        type="checkbox"
+                        checked={enabled}
+                        onChange={(event) =>
+                          toggleBuilderExercise(entry.exercise, event.target.checked)
+                        }
+                      />
+                      {entry.exercise}
+                    </label>
+                    {isFlowCategory ? (
+                      <span className="text-xs text-slate-600">
+                        {getExerciseTargetSeconds(
+                          exerciseCustomSeconds,
+                          entry.exercise,
+                          isTabata ? 20 : 60,
+                        )}
+                        s
+                      </span>
+                    ) : null}
+                  </div>
+                  {enabled ? (
+                    <div className="mt-2 grid gap-2 sm:grid-cols-5">
+                      <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                        Sätze
+                        <input
+                          type="number"
+                          min={0}
+                          value={entry.sets}
+                          onChange={(event) =>
+                            handleEntryChange(entry.exercise, { sets: event.target.value })
+                          }
+                          className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                        Reps
+                        <input
+                          type="number"
+                          min={0}
+                          value={entry.reps}
+                          onChange={(event) =>
+                            handleEntryChange(entry.exercise, { reps: event.target.value })
+                          }
+                          className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                        Gewicht kg
+                        <input
+                          type="number"
+                          min={0}
+                          step="0.5"
+                          value={entry.weightKg}
+                          onChange={(event) =>
+                            handleEntryChange(entry.exercise, { weightKg: event.target.value })
+                          }
+                          className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                        Dauer min
+                        <input
+                          type="number"
+                          min={0}
+                          value={entry.durationMinutes}
+                          onChange={(event) =>
+                            handleEntryChange(entry.exercise, { durationMinutes: event.target.value })
+                          }
+                          className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
+                        />
+                      </label>
+                      {isFlowCategory ? (
+                        <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          Flow Sekunden
+                          <input
+                            type="number"
+                            min={5}
+                            max={600}
+                            value={getExerciseTargetSeconds(
+                              exerciseCustomSeconds,
+                              entry.exercise,
+                              isTabata ? 20 : 60,
+                            )}
+                            onChange={(event) =>
+                              setExerciseCustomSeconds((current) => ({
+                                ...current,
+                                [entry.exercise]: Math.max(
+                                  5,
+                                  Number.parseInt(event.target.value || "5", 10),
+                                ),
+                              }))
+                            }
+                            className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
+                          />
+                        </label>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
         {isBodybuilding ? (
           <div className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50 p-3">
-            <label className="flex flex-col gap-1 text-sm font-medium text-indigo-900">
-              Trainingsplan
-              <select
-                value={bodybuildingPlan}
-                onChange={(event) => setBodybuildingPlan(event.target.value)}
-                className="rounded-lg border border-indigo-300 bg-white px-3 py-2 text-slate-900"
+            <p className="text-sm font-semibold text-indigo-900">Bodybuilding Trainingsplan</p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+              <input
+                value={newBodybuildingPlanName}
+                onChange={(event) => setNewBodybuildingPlanName(event.target.value)}
+                placeholder="Name für Trainingsplan"
+                className="rounded-md border border-indigo-300 bg-white px-3 py-2 text-sm text-slate-900"
+              />
+              <button
+                type="button"
+                onClick={saveBodybuildingPlan}
+                className="rounded-lg bg-indigo-700 px-3 py-2 text-sm font-semibold text-white"
               >
+                Plan speichern
+              </button>
+            </div>
+            <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+              <select
+                value={selectedBodybuildingPlanName}
+                onChange={(event) => setSelectedBodybuildingPlanName(event.target.value)}
+                className="rounded-md border border-indigo-300 bg-white px-3 py-2 text-sm text-slate-900"
+              >
+                <option value="">Gespeicherten Plan wählen</option>
                 {Object.keys(bodybuildingPlanMap).map((plan) => (
                   <option key={plan} value={plan}>
                     {plan}
                   </option>
                 ))}
+                {bodybuildingPlans.map((plan) => (
+                  <option key={plan.name} value={plan.name}>
+                    {plan.name}
+                  </option>
+                ))}
               </select>
-            </label>
+              <button
+                type="button"
+                onClick={() => {
+                  if (bodybuildingPlanMap[selectedBodybuildingPlanName]) {
+                    setSelectedBodybuildingPlanExercises(
+                      bodybuildingPlanMap[selectedBodybuildingPlanName],
+                    );
+                    const mapSet = new Set(bodybuildingPlanMap[selectedBodybuildingPlanName]);
+                    setHiddenExercisesByCategory((current) => {
+                      const nextHidden = allExercisesForCategory.filter(
+                        (exercise) => !mapSet.has(exercise),
+                      );
+                      const next = { ...current, [selectedCategory]: nextHidden };
+                      localStorage.setItem(hiddenExercisesStorageKey, JSON.stringify(next));
+                      return next;
+                    });
+                    setStatusText(`Trainingsplan "${selectedBodybuildingPlanName}" geladen.`);
+                    return;
+                  }
+                  loadBodybuildingPlan();
+                }}
+                className="rounded-lg border border-indigo-700 px-3 py-2 text-sm font-semibold text-indigo-800"
+              >
+                Plan laden
+              </button>
+            </div>
+            <p className="mt-3 text-xs font-semibold uppercase tracking-[0.12em] text-indigo-700">
+              Übungsauswahl (einmal einstellen)
+            </p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              {allExercisesForCategory.map((exercise) => (
+                <label
+                  key={exercise}
+                  className="flex items-center gap-2 rounded-md border border-indigo-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-900"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedBodybuildingPlanExercises.includes(exercise)}
+                    onChange={() => toggleBodybuildingPlanExercise(exercise)}
+                  />
+                  {exercise}
+                </label>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={applyBodybuildingSelection}
+              className="mt-2 rounded-lg border border-indigo-700 px-3 py-1.5 text-xs font-semibold text-indigo-800"
+            >
+              Auswahl anwenden
+            </button>
             <div className="mt-3 flex flex-wrap gap-2">
               {bodybuildingMuscleGroups.map((group) => (
                 <button
@@ -1452,6 +2420,128 @@ export function RoutineJournal({
                   {group}
                 </button>
               ))}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={startBodybuildingFlow}
+                className="rounded-lg bg-indigo-700 px-3 py-1.5 text-sm font-semibold text-white"
+              >
+                Bodybuilding starten
+              </button>
+              {bodybuildingFocusExercise ? (
+                <span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-semibold text-indigo-900">
+                  Fokus: {bodybuildingFocusExercise}
+                </span>
+              ) : null}
+            </div>
+          </div>
+          ) : null}
+
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
+          <p className="text-sm font-semibold text-amber-900">Favoriten (Quick Load)</p>
+          <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+            <input
+              value={newFavoriteName}
+              onChange={(event) => setNewFavoriteName(event.target.value)}
+              placeholder="Favoritenname"
+              className="rounded-md border border-amber-300 bg-white px-2 py-2 text-sm text-slate-900"
+            />
+            <button
+              type="button"
+              onClick={saveCategoryFavorite}
+              className="rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-white"
+            >
+              Als Favorit speichern
+            </button>
+          </div>
+          <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+            <select
+              value={selectedFavoriteName}
+              onChange={(event) => setSelectedFavoriteName(event.target.value)}
+              className="rounded-md border border-amber-300 bg-white px-2 py-2 text-sm text-slate-900"
+            >
+              <option value="">Favorit wählen</option>
+              {(favoritesByCategory[selectedCategory] ?? []).map((favorite) => (
+                <option key={`${favorite.category}-${favorite.name}`} value={favorite.name}>
+                  {favorite.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={loadCategoryFavorite}
+              className="rounded-lg border border-amber-600 px-3 py-2 text-sm font-semibold text-amber-800"
+            >
+              Laden
+            </button>
+          </div>
+        </div>
+
+        {isHitWorkout ? (
+          <div className="mt-4 rounded-xl border border-fuchsia-200 bg-fuchsia-50 p-3">
+            <p className="text-sm font-semibold text-fuchsia-900">HIT Runden & Workout-Set</p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-3">
+              <label className="flex flex-col gap-1 text-xs font-medium text-fuchsia-900">
+                Ziel-Runden
+                <input
+                  type="number"
+                  min={1}
+                  value={hitTargetRounds}
+                  onChange={(event) =>
+                    setHitTargetRounds(
+                      Math.max(1, Number.parseInt(event.target.value || "1", 10)),
+                    )
+                  }
+                  className="rounded-md border border-fuchsia-300 bg-white px-2 py-1.5 text-slate-900"
+                />
+              </label>
+              <div className="rounded-md border border-fuchsia-200 bg-white px-2 py-1.5 text-xs font-semibold text-fuchsia-900">
+                Runde: {Math.min(hitCurrentRound, hitTargetRounds)} / {hitTargetRounds}
+              </div>
+              <button
+                type="button"
+                onClick={completeHitRound}
+                className="rounded-lg bg-fuchsia-700 px-3 py-2 text-xs font-semibold text-white"
+              >
+                Runde DONE
+              </button>
+            </div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
+              <input
+                value={newHitSetName}
+                onChange={(event) => setNewHitSetName(event.target.value)}
+                placeholder="Name für HIT-Workout-Set"
+                className="rounded-md border border-fuchsia-300 bg-white px-2 py-2 text-sm text-slate-900"
+              />
+              <button
+                type="button"
+                onClick={saveHitWorkoutSet}
+                className="rounded-lg border border-fuchsia-600 px-3 py-2 text-sm font-semibold text-fuchsia-800"
+              >
+                Set speichern
+              </button>
+            </div>
+            <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+              <select
+                value={selectedHitSetName}
+                onChange={(event) => setSelectedHitSetName(event.target.value)}
+                className="rounded-md border border-fuchsia-300 bg-white px-2 py-2 text-sm text-slate-900"
+              >
+                <option value="">Workout-Set wählen</option>
+                {hitWorkoutSets.map((setItem) => (
+                  <option key={setItem.name} value={setItem.name}>
+                    {setItem.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={loadHitWorkoutSet}
+                className="rounded-lg bg-fuchsia-700 px-3 py-2 text-sm font-semibold text-white"
+              >
+                Set laden
+              </button>
             </div>
           </div>
         ) : null}
@@ -1949,22 +3039,35 @@ export function RoutineJournal({
                   <article
                     key={entry.exercise}
                     className={`rounded-xl border p-3 ${
-                      activeExerciseTimer?.exercise === entry.exercise
-                        ? "border-indigo-400 bg-indigo-50"
+                      (isBodybuilding
+                        ? bodybuildingFocusExercise === entry.exercise
+                        : activeExerciseTimer?.exercise === entry.exercise)
+                        ? "border-indigo-500 bg-indigo-50 shadow-sm"
                         : "border-slate-300 bg-white"
                     }`}
                   >
-                    <label className="flex items-start gap-2">
-                      <input
-                        type="checkbox"
-                        checked={entry.completed}
-                        onChange={(event) =>
-                          handleCompletedToggle(entry.exercise, event.target.checked)
-                        }
-                        className="mt-1 h-4 w-4"
-                      />
-                      <span className="text-sm font-semibold text-slate-900">{entry.exercise}</span>
-                    </label>
+                    <div className="flex items-start justify-between gap-2">
+                      <label className="flex items-start gap-2">
+                        <input
+                          type="checkbox"
+                          checked={entry.completed}
+                          onChange={(event) =>
+                            handleCompletedToggle(entry.exercise, event.target.checked)
+                          }
+                          className="mt-1 h-5 w-5 accent-indigo-700"
+                        />
+                        <span className="text-sm font-semibold text-slate-900">{entry.exercise}</span>
+                      </label>
+                      {isBodybuilding ? (
+                        <button
+                          type="button"
+                          onClick={() => completeBodybuildingAndNext(entry.exercise)}
+                          className="rounded-md bg-indigo-700 px-2 py-1 text-xs font-semibold text-white"
+                        >
+                          Done & Next
+                        </button>
+                      ) : null}
+                    </div>
 
                     <div className="mt-3 rounded-md bg-cyan-50 px-2 py-2">
                       <p className="text-xs font-semibold text-cyan-900">
@@ -1992,7 +3095,7 @@ export function RoutineJournal({
                       {isBodybuilding ? (
                         <>
                           <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
-                            Wiederholungen
+                            Wiederholungen pro Satz
                             <input
                               type="number"
                               min={0}
@@ -2017,13 +3120,13 @@ export function RoutineJournal({
                             />
                           </label>
                           <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
-                            Zielzeit (min)
+                            Sätze pro Übung
                             <input
                               type="number"
                               min={0}
-                              value={entry.targetMinutes}
+                              value={entry.sets}
                               onChange={(event) =>
-                                handleEntryChange(entry.exercise, { targetMinutes: event.target.value })
+                                handleEntryChange(entry.exercise, { sets: event.target.value })
                               }
                               className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
                             />
@@ -2062,6 +3165,18 @@ export function RoutineJournal({
                               value={entry.reps}
                               onChange={(event) =>
                                 handleEntryChange(entry.exercise, { reps: event.target.value })
+                              }
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                            Sätze (optional)
+                            <input
+                              type="number"
+                              min={0}
+                              value={entry.sets}
+                              onChange={(event) =>
+                                handleEntryChange(entry.exercise, { sets: event.target.value })
                               }
                               className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
                             />
@@ -2120,7 +3235,36 @@ export function RoutineJournal({
               Offline speichern
             </button>
           )}
+          {activeTab === "lite" ? (
+            <>
+              <button
+                type="button"
+                onClick={triggerOfflineImport}
+                className="rounded-lg border border-indigo-600 px-4 py-2 text-sm font-semibold text-indigo-800"
+              >
+                Offline laden
+              </button>
+              <button
+                type="button"
+                onClick={exportOfflineData}
+                className="rounded-lg border border-slate-400 px-4 py-2 text-sm font-semibold text-slate-700"
+              >
+                Datei exportieren
+              </button>
+              <input
+                ref={offlineImportRef}
+                type="file"
+                accept="application/json,.json"
+                onChange={(event) => {
+                  void handleOfflineImport(event);
+                }}
+                className="hidden"
+              />
+            </>
+          ) : null}
         </div>
+        </>
+        ) : null}
 
         {statusText ? <p className="mt-3 text-sm font-semibold text-emerald-800">{statusText}</p> : null}
         {errorText ? <p className="mt-2 text-sm font-semibold text-rose-800">{errorText}</p> : null}
