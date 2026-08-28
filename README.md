@@ -6,7 +6,8 @@ Mobil-first Journal fuer Morgenroutine, HIT und Running/Cardio:
 - Offline Lite Modus ohne Login
 - Overall Timer + Start/Stop pro Uebung
 - Zielzeit pro Uebung
-- Stimmungsabfrage mit vorausgefuelltem Tagebuchtext
+- Morning-Flow Check-in (0-10 + Freitext) mit Tracking
+- Bodybuilding Satz-Logging (Reps + Gewicht pro Satz, DONE pro Satz)
 - Eigene Uebungen hinzufuegen, ausblenden und verwalten
 - Uebungsuebersicht ueber alle Kategorien
 

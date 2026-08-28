@@ -23,6 +23,11 @@ type EntryState = {
   completed: boolean;
   sets: string;
   completedSets: number;
+  setLogs: Array<{
+    reps: string;
+    weightKg: string;
+    done: boolean;
+  }>;
   reps: string;
   weightKg: string;
   durationMinutes: string;
@@ -36,6 +41,7 @@ type CloudRow = {
   completed: boolean;
   sets?: number | null;
   completed_sets?: number | null;
+  set_logs?: Array<{ reps?: string; weightKg?: string; done?: boolean }> | null;
   reps: number | null;
   weight_kg?: number | null;
   duration_minutes: number | null;
@@ -47,6 +53,8 @@ type CloudRow = {
 type ReflectionState = {
   mood: string;
   text: string;
+  flowScore: string;
+  flowJournal: string;
 };
 
 type LiteDayPayload = {
@@ -105,6 +113,8 @@ type UserProfile = {
   reminderTime: string;
 };
 
+type DashboardGraphKey = "weight" | "duration" | "volume" | "categoryMix" | "consistency";
+
 type BuilderMuscleGroup =
   | "Alle"
   | "Brust"
@@ -141,6 +151,14 @@ const workoutBuilderTemplatesStorageKey = "momentum-builder:templates:v1";
 const routineComposerStorageKey = "momentum-builder:routine-composer:v1";
 const lastQuickLoadStorageKey = "momentum-quickload:last-by-category:v1";
 const profileStorageKey = "momentum-profile:v1";
+const dashboardGraphConfigStorageKey = "momentum-dashboard:graph-config:v1";
+const defaultDashboardGraphConfig: Record<DashboardGraphKey, boolean> = {
+  weight: true,
+  duration: true,
+  volume: true,
+  categoryMix: true,
+  consistency: true,
+};
 const builderMuscleGroups: BuilderMuscleGroup[] = [
   "Alle",
   "Brust",
@@ -319,6 +337,16 @@ function formatSeconds(totalSeconds: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function formatDurationCompact(totalSeconds: number): string {
+  const safe = Math.max(0, totalSeconds);
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
+}
+
 function parsePositiveInt(value: string): number | null {
   if (!value.trim()) {
     return null;
@@ -340,6 +368,7 @@ function buildDefaultEntries(exercises: string[]): EntryState[] {
     completed: false,
     sets: "",
     completedSets: 0,
+    setLogs: [],
     reps: "",
     weightKg: "",
     durationMinutes: "",
@@ -353,6 +382,38 @@ function buildDefaultReflection(): ReflectionState {
   return {
     mood: "Neutral",
     text: moodTemplates["Neutral"],
+    flowScore: "",
+    flowJournal: "",
+  };
+}
+
+function normalizeSetLogs(
+  rawSetLogs: unknown,
+  targetSetsRaw: string,
+): Array<{ reps: string; weightKg: string; done: boolean }> {
+  const targetSets = Math.max(0, Number.parseInt(targetSetsRaw || "0", 10) || 0);
+  if (targetSets === 0) {
+    return [];
+  }
+
+  const source = Array.isArray(rawSetLogs) ? rawSetLogs : [];
+  return Array.from({ length: targetSets }, (_, index) => {
+    const raw = source[index] as
+      | { reps?: string; weightKg?: string; done?: boolean }
+      | undefined;
+    const reps = raw?.reps ?? "";
+    const weightKg = raw?.weightKg ?? "";
+    const done = Boolean(raw?.done && reps.trim() && weightKg.trim());
+    return { reps, weightKg, done };
+  });
+}
+
+function normalizeReflection(raw?: Partial<ReflectionState> | null): ReflectionState {
+  return {
+    ...buildDefaultReflection(),
+    ...(raw ?? {}),
+    flowScore: raw?.flowScore ?? "",
+    flowJournal: raw?.flowJournal ?? "",
   };
 }
 
@@ -365,6 +426,7 @@ function toEntryMap(rows: CloudRow[], exercises: string[]): EntryState[] {
       completed: row?.completed ?? false,
       sets: row?.sets?.toString() ?? "",
       completedSets: row?.completed_sets ?? 0,
+      setLogs: normalizeSetLogs(row?.set_logs, row?.sets?.toString() ?? ""),
       reps: row?.reps?.toString() ?? "",
       weightKg: row?.weight_kg?.toString() ?? "",
       durationMinutes: row?.duration_minutes?.toString() ?? "",
@@ -391,6 +453,7 @@ function normalizeEntries(entries: Partial<EntryState>[], exercises: string[]): 
       completed: row?.completed ?? false,
       sets: row?.sets ?? "",
       completedSets: row?.completedSets ?? 0,
+      setLogs: normalizeSetLogs(row?.setLogs, row?.sets ?? ""),
       reps: row?.reps ?? "",
       weightKg: row?.weightKg ?? "",
       durationMinutes: row?.durationMinutes ?? "",
@@ -410,18 +473,28 @@ function getExerciseTargetSeconds(
 }
 
 function createEntryTemplate(exercise: string, defaults?: Partial<EntryState>): EntryState {
-  return {
+  const targetSets = defaults?.sets ?? "";
+  const normalizedLogs = normalizeSetLogs(defaults?.setLogs, targetSets);
+  const completedSets = normalizedLogs.filter((setLog) => setLog.done).length;
+  const base: EntryState = {
     exercise,
     completed: false,
     sets: "",
     completedSets: 0,
+    setLogs: [],
     reps: "",
     weightKg: "",
     durationMinutes: "",
     targetMinutes: "",
     trackedSeconds: 0,
     notes: "",
+  };
+  return {
+    ...base,
     ...defaults,
+    sets: targetSets,
+    setLogs: normalizedLogs,
+    completedSets,
   };
 }
 
@@ -530,6 +603,7 @@ export function RoutineJournal({
     startedAtMs: number;
   } | null>(null);
   const [morningFlowActive, setMorningFlowActive] = useState(false);
+  const [showFlowCompletionPrompt, setShowFlowCompletionPrompt] = useState(false);
   const [minuteAlertedExercise, setMinuteAlertedExercise] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [customExercisesByCategory, setCustomExercisesByCategory] = useState<
@@ -581,6 +655,26 @@ export function RoutineJournal({
     }
   });
   const [newExerciseName, setNewExerciseName] = useState("");
+  const [dashboardRange, setDashboardRange] = useState<"7" | "30" | "90" | "all">("7");
+  const [exerciseDurationFilter, setExerciseDurationFilter] = useState<string>("all");
+  const [dashboardGraphConfig, setDashboardGraphConfig] = useState<Record<DashboardGraphKey, boolean>>(() => {
+    if (typeof window === "undefined") {
+      return defaultDashboardGraphConfig;
+    }
+    const raw = window.localStorage.getItem(dashboardGraphConfigStorageKey);
+    if (!raw) {
+      return defaultDashboardGraphConfig;
+    }
+    try {
+      const parsed = JSON.parse(raw) as Partial<Record<DashboardGraphKey, boolean>>;
+      return {
+        ...defaultDashboardGraphConfig,
+        ...parsed,
+      };
+    } catch {
+      return defaultDashboardGraphConfig;
+    }
+  });
   const [statusText, setStatusText] = useState("");
   const [errorText, setErrorText] = useState("");
 
@@ -816,6 +910,13 @@ export function RoutineJournal({
   }, [profile]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    localStorage.setItem(dashboardGraphConfigStorageKey, JSON.stringify(dashboardGraphConfig));
+  }, [dashboardGraphConfig]);
+
+  useEffect(() => {
     if (activeTab !== "cloud" || !supabase || !session?.user.id) {
       return;
     }
@@ -823,14 +924,25 @@ export function RoutineJournal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, profile, session?.user.id, supabase]);
 
+  useEffect(() => {
+    setShowFlowCompletionPrompt(false);
+  }, [selectedCategory, selectedDate]);
+
   const overviewStats = useMemo(() => {
     if (typeof window === "undefined") {
       return {
         totalSessions: 0,
         totalCompleted: 0,
         topExercises: [] as Array<{ name: string; count: number }>,
+        topExerciseDurations: [] as Array<{ name: string; seconds: number }>,
         weightTrend: [] as Array<{ key: string; value: number | null }>,
         weightDailySeries: [] as Array<{ key: string; value: number }>,
+        volumeTrend: [] as Array<{ key: string; value: number }>,
+        categoryMix: [] as Array<{ name: string; value: number }>,
+        totalTrackedSeconds: 0,
+        totalWorkoutSeconds: 0,
+        avgWorkoutSeconds: 0,
+        recent7DurationSeconds: getLastNDays(7).map((key) => ({ key, seconds: 0 })),
         recent7Days: getLastNDays(7).map((key) => ({ key, count: 0 })),
         weekView: getWeekKeysMondayToSunday(selectedDate).map((key) => ({
           key,
@@ -847,19 +959,29 @@ export function RoutineJournal({
       };
     }
 
-    const recent7 = getLastNDays(7);
+    const rangeDays = dashboardRange === "all" ? 365 : Number(dashboardRange);
+    const activeRangeKeys = dashboardRange === "all" ? getLastNDays(365) : getLastNDays(rangeDays);
+    const activeRangeSet = new Set(activeRangeKeys);
+    const recent7 = getLastNDays(Math.min(7, Math.max(rangeDays, 7)));
     const weekKeys = getWeekKeysMondayToSunday(selectedDate);
     const monthMeta = getMonthMeta(selectedDate);
     const counts = new Map<string, number>();
     const dayDone = new Map<string, boolean>();
     const exerciseCounts = new Map<string, number>();
+    const exerciseDurations = new Map<string, number>();
+    const durationByDay = new Map<string, number>();
     const weightByDay = new Map<string, number[]>();
+    const categoryMix = new Map<string, number>();
+    const volumeByDay = new Map<string, number>();
     let totalSessions = 0;
     let totalCompleted = 0;
+    let totalTrackedSeconds = 0;
+    let totalWorkoutSeconds = 0;
 
     for (const dayKey of [...recent7, ...weekKeys, ...monthMeta.keys]) {
       counts.set(dayKey, 0);
       dayDone.set(dayKey, false);
+      durationByDay.set(dayKey, 0);
     }
 
     const localKeys = Object.keys(localStorage);
@@ -873,23 +995,61 @@ export function RoutineJournal({
         if (!raw) {
           continue;
         }
-        const dateKey = key.replace("momentum-lite:", "").split(":")[0];
+        const keyParts = key.replace("momentum-lite:", "").split(":");
+        const dateKey = keyParts[0];
+        const categoryName = keyParts.slice(1).join(":") || "Unsortiert";
+        if (dashboardRange !== "all" && !activeRangeSet.has(dateKey)) {
+          continue;
+        }
 
         const parsed = JSON.parse(raw) as LiteDayPayload | EntryState[];
         const dayEntries = Array.isArray(parsed) ? parsed : parsed.entries ?? [];
         const completedEntries = dayEntries.filter((entry) => entry.completed);
+        const trackedSecondsFromEntries = dayEntries.reduce(
+          (sum, entry) => sum + Math.max(0, entry.trackedSeconds ?? 0),
+          0,
+        );
+        const workoutSeconds =
+          Array.isArray(parsed) || typeof parsed.overallSeconds !== "number"
+            ? trackedSecondsFromEntries
+            : Math.max(0, parsed.overallSeconds);
+        const volumeForDay = dayEntries.reduce((sum, entry) => {
+          if (!entry.completed) {
+            return sum;
+          }
+          const setVolume = entry.setLogs.length > 0
+            ? entry.setLogs.reduce((setSum, set) => setSum + (Number.parseInt(set.reps || "0", 10) || 0), 0)
+            : Math.max(0, Number.parseInt(entry.reps || "0", 10) || 0);
+          return sum + setVolume;
+        }, 0);
+        if (volumeForDay > 0) {
+          volumeByDay.set(dateKey, (volumeByDay.get(dateKey) ?? 0) + volumeForDay);
+        }
+        if (completedEntries.length > 0) {
+          categoryMix.set(categoryName, (categoryMix.get(categoryName) ?? 0) + completedEntries.length);
+        }
 
         if (completedEntries.length > 0) {
           totalSessions += 1;
           dayDone.set(dateKey, true);
         }
         totalCompleted += completedEntries.length;
+        totalTrackedSeconds += trackedSecondsFromEntries;
+        totalWorkoutSeconds += workoutSeconds;
+        durationByDay.set(dateKey, (durationByDay.get(dateKey) ?? 0) + workoutSeconds);
 
         for (const entry of completedEntries) {
           exerciseCounts.set(entry.exercise, (exerciseCounts.get(entry.exercise) ?? 0) + 1);
         }
 
         for (const entry of dayEntries) {
+          const trackedSeconds = Math.max(0, entry.trackedSeconds ?? 0);
+          if (trackedSeconds > 0) {
+            exerciseDurations.set(
+              entry.exercise,
+              (exerciseDurations.get(entry.exercise) ?? 0) + trackedSeconds,
+            );
+          }
           const parsedWeight = Number.parseFloat(entry.weightKg || "");
           if (!Number.isNaN(parsedWeight) && parsedWeight > 0) {
             const current = weightByDay.get(dateKey) ?? [];
@@ -913,8 +1073,12 @@ export function RoutineJournal({
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 5);
+    const topExerciseDurations = Array.from(exerciseDurations.entries())
+      .map(([name, seconds]) => ({ name, seconds }))
+      .sort((a, b) => b.seconds - a.seconds)
+      .slice(0, 5);
 
-    const weightTrendKeys = getLastNDays(14);
+    const weightTrendKeys = dashboardRange === "all" ? getLastNDays(30) : getLastNDays(Math.min(14, rangeDays));
     const weightTrend = weightTrendKeys.map((key) => {
       const values = weightByDay.get(key) ?? [];
       if (values.length === 0) {
@@ -929,13 +1093,28 @@ export function RoutineJournal({
         value: Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 10) / 10,
       }))
       .sort((a, b) => a.key.localeCompare(b.key));
+    const volumeTrend = getLastNDays(dashboardRange === "all" ? 30 : Math.min(30, Number(dashboardRange))).map((key) => ({
+      key,
+      value: volumeByDay.get(key) ?? 0,
+    }));
+    const categoryMixSeries = Array.from(categoryMix.entries())
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
 
     return {
       totalSessions,
       totalCompleted,
       topExercises,
+      topExerciseDurations,
       weightTrend,
       weightDailySeries,
+      volumeTrend,
+      categoryMix: categoryMixSeries,
+      totalTrackedSeconds,
+      totalWorkoutSeconds,
+      avgWorkoutSeconds:
+        totalSessions > 0 ? Math.round(totalWorkoutSeconds / totalSessions) : 0,
+      recent7DurationSeconds: recent7.map((key) => ({ key, seconds: durationByDay.get(key) ?? 0 })),
       recent7Days: recent7.map((key) => ({ key, count: counts.get(key) ?? 0 })),
       weekView: weekKeys.map((key) => ({
         key,
@@ -950,7 +1129,14 @@ export function RoutineJournal({
         done: dayDone.get(key) ?? false,
       })),
     };
-  }, [selectedDate]);
+  }, [dashboardRange, selectedDate]);
+
+  const toggleDashboardGraph = (key: DashboardGraphKey) => {
+    setDashboardGraphConfig((current) => ({
+      ...current,
+      [key]: !current[key],
+    }));
+  };
 
   const baseExercises = useMemo(
     () => categories.find((item) => item.name === selectedCategory)?.exercises ?? [],
@@ -1029,6 +1215,7 @@ export function RoutineJournal({
           completed: false,
           sets: "",
           completedSets: 0,
+          setLogs: [],
           reps: "",
           weightKg: "",
           durationMinutes: "",
@@ -1048,6 +1235,7 @@ export function RoutineJournal({
           completed: false,
           sets: "",
           completedSets: 0,
+          setLogs: [],
           reps: "",
           weightKg: "",
           durationMinutes: "",
@@ -1140,7 +1328,7 @@ export function RoutineJournal({
       const selectWithTimers = await supabase
         .from("daily_entries")
         .select(
-          "exercise,completed,sets,completed_sets,reps,weight_kg,duration_minutes,target_minutes,tracked_seconds,notes",
+          "exercise,completed,sets,completed_sets,set_logs,reps,weight_kg,duration_minutes,target_minutes,tracked_seconds,notes",
         )
         .eq("user_id", session.user.id)
         .eq("entry_date", selectedDate)
@@ -1152,6 +1340,7 @@ export function RoutineJournal({
       if (
         error?.message.includes("sets") ||
         error?.message.includes("completed_sets") ||
+        error?.message.includes("set_logs") ||
         error?.message.includes("weight_kg") ||
         error?.message.includes("target_minutes") ||
         error?.message.includes("tracked_seconds")
@@ -1180,13 +1369,26 @@ export function RoutineJournal({
       setEntries(toEntryMap(rows, activeExercises));
       setLoadingEntries(false);
 
-      const reflectionResult = await supabase
+      let reflectionResult = await supabase
         .from("daily_reflections")
-        .select("mood,reflection,overall_seconds")
+        .select("mood,reflection,overall_seconds,flow_score,flow_note")
         .eq("user_id", session.user.id)
         .eq("entry_date", selectedDate)
         .eq("category", selectedCategory)
         .maybeSingle();
+
+      if (
+        reflectionResult.error?.message.includes("flow_score") ||
+        reflectionResult.error?.message.includes("flow_note")
+      ) {
+        reflectionResult = await supabase
+          .from("daily_reflections")
+          .select("mood,reflection,overall_seconds")
+          .eq("user_id", session.user.id)
+          .eq("entry_date", selectedDate)
+          .eq("category", selectedCategory)
+          .maybeSingle();
+      }
 
       if (disposed) {
         return;
@@ -1200,10 +1402,18 @@ export function RoutineJournal({
         return;
       }
 
-      setReflection({
-        mood: reflectionResult.data?.mood ?? "Neutral",
-        text: reflectionResult.data?.reflection ?? moodTemplates["Neutral"],
-      });
+      setReflection(
+        normalizeReflection({
+          mood: reflectionResult.data?.mood ?? "Neutral",
+          text: reflectionResult.data?.reflection ?? moodTemplates["Neutral"],
+          flowScore:
+            reflectionResult.data?.flow_score === null ||
+            reflectionResult.data?.flow_score === undefined
+              ? ""
+              : String(reflectionResult.data.flow_score),
+          flowJournal: reflectionResult.data?.flow_note ?? "",
+        }),
+      );
       setOverallBaseSeconds(reflectionResult.data?.overall_seconds ?? 0);
     };
 
@@ -1234,7 +1444,7 @@ export function RoutineJournal({
 
       if (!raw) {
         setEntries(buildDefaultEntries(activeExercises));
-        setReflection(buildDefaultReflection());
+        setReflection(normalizeReflection());
         setOverallBaseSeconds(0);
         return;
       }
@@ -1243,17 +1453,17 @@ export function RoutineJournal({
         const parsed = JSON.parse(raw) as LiteDayPayload | EntryState[];
         if (Array.isArray(parsed)) {
           setEntries(normalizeEntries(parsed, activeExercises));
-          setReflection(buildDefaultReflection());
+          setReflection(normalizeReflection());
           setOverallBaseSeconds(0);
           return;
         }
 
         setEntries(normalizeEntries(parsed.entries ?? [], activeExercises));
-        setReflection(parsed.reflection ?? buildDefaultReflection());
+        setReflection(normalizeReflection(parsed.reflection));
         setOverallBaseSeconds(parsed.overallSeconds ?? 0);
       } catch (error) {
         setEntries(buildDefaultEntries(activeExercises));
-        setReflection(buildDefaultReflection());
+        setReflection(normalizeReflection());
         setOverallBaseSeconds(0);
         setErrorText(`Lokale Daten sind ungültig: ${String(error)}`);
       }
@@ -1271,6 +1481,103 @@ export function RoutineJournal({
         entry.exercise === exercise ? { ...entry, ...patch } : entry,
       ),
     );
+  };
+
+  const handleSetCountChange = (exercise: string, setsValue: string) => {
+    setEntries((current) =>
+      current.map((entry) => {
+        if (entry.exercise !== exercise) {
+          return entry;
+        }
+        const normalizedLogs = normalizeSetLogs(entry.setLogs, setsValue);
+        const completedSets = normalizedLogs.filter((setLog) => setLog.done).length;
+        const targetSets = Math.max(0, Number.parseInt(setsValue || "0", 10) || 0);
+        return {
+          ...entry,
+          sets: setsValue,
+          setLogs: normalizedLogs,
+          completedSets,
+          completed: targetSets > 0 ? completedSets >= targetSets : entry.completed,
+        };
+      }),
+    );
+  };
+
+  const updateSetLogValue = (
+    exercise: string,
+    setIndex: number,
+    field: "reps" | "weightKg",
+    value: string,
+  ) => {
+    setEntries((current) =>
+      current.map((entry) => {
+        if (entry.exercise !== exercise) {
+          return entry;
+        }
+        const setLogs = [...entry.setLogs];
+        if (!setLogs[setIndex]) {
+          return entry;
+        }
+        const nextLog = { ...setLogs[setIndex], [field]: value };
+        if (!nextLog.reps.trim() || !nextLog.weightKg.trim()) {
+          nextLog.done = false;
+        }
+        setLogs[setIndex] = nextLog;
+        const completedSets = setLogs.filter((setLog) => setLog.done).length;
+        const targetSets = Math.max(0, Number.parseInt(entry.sets || "0", 10) || 0);
+        return {
+          ...entry,
+          setLogs,
+          completedSets,
+          completed: targetSets > 0 ? completedSets >= targetSets : entry.completed,
+        };
+      }),
+    );
+  };
+
+  const toggleSetDone = (exercise: string, setIndex: number, done: boolean): boolean => {
+    let success = true;
+    setEntries((current) =>
+      current.map((entry) => {
+        if (entry.exercise !== exercise) {
+          return entry;
+        }
+        const setLogs = [...entry.setLogs];
+        const setLog = setLogs[setIndex];
+        if (!setLog) {
+          return entry;
+        }
+        if (done) {
+          const repsValue = Number.parseInt(setLog.reps || "", 10);
+          const weightValue = Number.parseFloat(setLog.weightKg || "");
+          if (
+            Number.isNaN(repsValue) ||
+            repsValue <= 0 ||
+            Number.isNaN(weightValue) ||
+            weightValue <= 0
+          ) {
+            success = false;
+            return entry;
+          }
+        }
+        setLogs[setIndex] = { ...setLog, done };
+        const completedSets = setLogs.filter((item) => item.done).length;
+        const targetSets = Math.max(0, Number.parseInt(entry.sets || "0", 10) || 0);
+        return {
+          ...entry,
+          setLogs,
+          completedSets,
+          completed: targetSets > 0 ? completedSets >= targetSets : entry.completed,
+        };
+      }),
+    );
+
+    if (!success) {
+      setErrorText("Für DONE pro Satz bitte Reps und Gewicht > 0 eintragen.");
+      return false;
+    }
+    setErrorText("");
+    return true;
   };
 
   const pauseExerciseTimer = (exercise: string) => {
@@ -1334,6 +1641,9 @@ export function RoutineJournal({
       setStatusText(
         `${flowLabel} Flow abgeschlossen - stark durchgezogen!`,
       );
+      if (isMorningRoutine) {
+        setShowFlowCompletionPrompt(true);
+      }
       return;
     }
 
@@ -1343,11 +1653,26 @@ export function RoutineJournal({
   };
 
   const handleCompletedToggle = (exercise: string, checked: boolean) => {
+    const matchingEntry = visibleEntries.find((entry) => entry.exercise === exercise);
+    if (isBodybuilding && checked) {
+      const requiredSets = Math.max(0, Number.parseInt(matchingEntry?.sets || "0", 10) || 0);
+      const allSetsDone =
+        requiredSets > 0 &&
+        matchingEntry?.setLogs.length === requiredSets &&
+        matchingEntry.setLogs.every((setLog) => {
+          const repsValue = Number.parseInt(setLog.reps || "", 10);
+          const weightValue = Number.parseFloat(setLog.weightKg || "");
+          return setLog.done && repsValue > 0 && weightValue > 0;
+        });
+      if (!allSetsDone) {
+        setErrorText("Bodybuilding: erst alle Sätze mit Reps + Gewicht als DONE markieren.");
+        return;
+      }
+    }
+
     handleEntryChange(exercise, {
       completed: checked,
-      completedSets: checked
-        ? visibleEntries.find((entry) => entry.exercise === exercise)?.completedSets ?? 0
-        : 0,
+      completedSets: checked ? matchingEntry?.completedSets ?? 0 : 0,
     });
 
     if (isBodybuilding && checked && bodybuildingFlowActive) {
@@ -1379,6 +1704,7 @@ export function RoutineJournal({
     );
     const firstExercise = firstIncomplete ?? activeExercises[0];
 
+    setShowFlowCompletionPrompt(false);
     setMorningFlowActive(true);
     setMinuteAlertedExercise(null);
     setActiveExerciseTimer({ exercise: firstExercise, startedAtMs: Date.now() });
@@ -1390,6 +1716,17 @@ export function RoutineJournal({
     if (!overallStartedAtMs) {
       setOverallStartedAtMs(Date.now());
     }
+  };
+
+  const submitFlowCompletion = () => {
+    const score = Number.parseInt(reflection.flowScore || "", 10);
+    if (Number.isNaN(score) || score < 0 || score > 10) {
+      setErrorText("Bitte einen Wert von 0 bis 10 für den Morning-Check eintragen.");
+      return;
+    }
+    setShowFlowCompletionPrompt(false);
+    setStatusText("Morning Check-in gespeichert.");
+    setErrorText("");
   };
 
   const toggleExerciseVisibility = (exercise: string) => {
@@ -1436,6 +1773,7 @@ export function RoutineJournal({
         completed: false,
         sets: "",
         completedSets: 0,
+        setLogs: [],
         reps: "",
         weightKg: "",
         durationMinutes: "",
@@ -1589,22 +1927,46 @@ export function RoutineJournal({
     setErrorText("");
   };
 
-  const completeBodybuildingAndNext = (exercise: string) => {
-    const targetSets =
-      visibleEntries.find((entry) => entry.exercise === exercise)?.sets ?? "0";
+  const completeBodybuildingAndNext = (exercise: string): boolean => {
+    const currentEntry = visibleEntries.find((entry) => entry.exercise === exercise);
+    if (!currentEntry) {
+      return false;
+    }
+    const targetSets = currentEntry.sets ?? "0";
+    const requiredSets = Math.max(0, Number.parseInt(targetSets || "0", 10) || 0);
+    if (requiredSets === 0) {
+      setErrorText("Bitte zuerst eine Satzzahl > 0 festlegen.");
+      return false;
+    }
+    if (currentEntry.setLogs.length !== requiredSets) {
+      setErrorText("Satzzahl und Satz-Logs stimmen noch nicht überein.");
+      return false;
+    }
+    const missingSetData = currentEntry.setLogs.some((setLog) => {
+      const repsValue = Number.parseInt(setLog.reps || "", 10);
+      const weightValue = Number.parseFloat(setLog.weightKg || "");
+      return !setLog.done || Number.isNaN(repsValue) || repsValue <= 0 || Number.isNaN(weightValue) || weightValue <= 0;
+    });
+    if (missingSetData) {
+      setErrorText("Bitte jeden Satz mit Reps + Gewicht ausfüllen und DONE abhaken.");
+      return false;
+    }
+
     handleEntryChange(exercise, {
       completed: true,
-      completedSets: Math.max(0, Number.parseInt(targetSets || "0", 10) || 0),
+      completedSets: requiredSets,
     });
     const currentIndex = visibleEntries.findIndex((entry) => entry.exercise === exercise);
     const nextEntry = visibleEntries.slice(currentIndex + 1).find((entry) => !entry.completed);
     setBodybuildingFocusExercise(nextEntry?.exercise ?? null);
+    setErrorText("");
     if (!nextEntry) {
       setBodybuildingFlowActive(false);
       setStatusText("Bodybuilding Session abgeschlossen - stark!");
     } else {
       setStatusText(`Weiter mit: ${nextEntry.exercise}`);
     }
+    return true;
   };
 
   const toggleBuilderExercise = (exercise: string, enabled: boolean) => {
@@ -1648,27 +2010,6 @@ export function RoutineJournal({
       localStorage.setItem(exerciseOrderStorageKey, JSON.stringify(next));
       return next;
     });
-  };
-
-  const updateCompletedSets = (exercise: string, delta: number) => {
-    setEntries((current) =>
-      current.map((entry) => {
-        if (entry.exercise !== exercise) {
-          return entry;
-        }
-        const targetSets = Number.parseInt(entry.sets || "0", 10);
-        const maxSets = Number.isNaN(targetSets) ? 0 : Math.max(0, targetSets);
-        const nextCompleted = Math.min(
-          Math.max((entry.completedSets ?? 0) + delta, 0),
-          maxSets > 0 ? maxSets : Number.MAX_SAFE_INTEGER,
-        );
-        return {
-          ...entry,
-          completedSets: nextCompleted,
-          completed: maxSets > 0 ? nextCompleted >= maxSets : entry.completed,
-        };
-      }),
-    );
   };
 
   const rememberQuickLoad = (type: QuickLoadType, name: string) => {
@@ -1853,7 +2194,14 @@ export function RoutineJournal({
     const visibleNames = new Set(visibleEntries.map((entry) => entry.exercise));
     setEntries((current) =>
       current.map((entry) =>
-        visibleNames.has(entry.exercise) ? { ...entry, completed: false, completedSets: 0 } : entry,
+        visibleNames.has(entry.exercise)
+          ? {
+              ...entry,
+              completed: false,
+              completedSets: 0,
+              setLogs: entry.setLogs.map((setLog) => ({ ...setLog, done: false })),
+            }
+          : entry,
       ),
     );
     setHitCurrentRound((current) => current + 1);
@@ -1945,6 +2293,7 @@ export function RoutineJournal({
           completed: false,
           sets: item.sets || existing?.sets || "",
           completedSets: existing?.completedSets ?? 0,
+          setLogs: normalizeSetLogs(existing?.setLogs, item.sets || existing?.sets || ""),
           reps: item.reps,
           weightKg: existing?.weightKg ?? "",
           durationMinutes: existing?.durationMinutes ?? "",
@@ -2027,7 +2376,7 @@ export function RoutineJournal({
       }
       return Array.from(byExercise.values());
     });
-    setReflection(favorite.reflection);
+    setReflection(normalizeReflection(favorite.reflection));
     setExerciseCustomSeconds(favorite.exerciseCustomSeconds);
     setHitTargetRounds(favorite.hitTargetRounds || 3);
     setHitCurrentRound(1);
@@ -2188,7 +2537,7 @@ export function RoutineJournal({
 
       if (parsed.currentPayload) {
         setEntries(normalizeEntries(parsed.currentPayload.entries ?? [], activeExercises));
-        setReflection(parsed.currentPayload.reflection ?? buildDefaultReflection());
+        setReflection(normalizeReflection(parsed.currentPayload.reflection));
         setOverallBaseSeconds(parsed.currentPayload.overallSeconds ?? 0);
       }
 
@@ -2424,6 +2773,14 @@ export function RoutineJournal({
       completed: entry.completed,
       sets: parsePositiveInt(entry.sets),
       completed_sets: entry.completedSets,
+      set_logs:
+        entry.setLogs.length > 0
+          ? entry.setLogs.map((setLog) => ({
+              reps: setLog.reps.trim(),
+              weightKg: setLog.weightKg.trim(),
+              done: setLog.done,
+            }))
+          : null,
       reps: parsePositiveInt(entry.reps),
       weight_kg: parsePositiveInt(entry.weightKg),
       duration_minutes: parsePositiveInt(entry.durationMinutes),
@@ -2439,6 +2796,7 @@ export function RoutineJournal({
     if (
       upsertResult.error?.message.includes("sets") ||
       upsertResult.error?.message.includes("completed_sets") ||
+      upsertResult.error?.message.includes("set_logs") ||
       upsertResult.error?.message.includes("weight_kg") ||
       upsertResult.error?.message.includes("target_minutes") ||
       upsertResult.error?.message.includes("tracked_seconds")
@@ -2463,7 +2821,7 @@ export function RoutineJournal({
       return;
     }
 
-    const reflectionResult = await supabase.from("daily_reflections").upsert(
+    let reflectionResult = await supabase.from("daily_reflections").upsert(
       {
         user_id: session.user.id,
         entry_date: selectedDate,
@@ -2471,9 +2829,28 @@ export function RoutineJournal({
         mood: reflection.mood,
         reflection: reflection.text.trim(),
         overall_seconds: overallLiveSeconds,
+        flow_score: parsePositiveInt(reflection.flowScore),
+        flow_note: reflection.flowJournal.trim(),
       },
       { onConflict: "user_id,entry_date,category" },
     );
+
+    if (
+      reflectionResult.error?.message.includes("flow_score") ||
+      reflectionResult.error?.message.includes("flow_note")
+    ) {
+      reflectionResult = await supabase.from("daily_reflections").upsert(
+        {
+          user_id: session.user.id,
+          entry_date: selectedDate,
+          category: selectedCategory,
+          mood: reflection.mood,
+          reflection: reflection.text.trim(),
+          overall_seconds: overallLiveSeconds,
+        },
+        { onConflict: "user_id,entry_date,category" },
+      );
+    }
 
     if (
       reflectionResult.error &&
@@ -2597,6 +2974,11 @@ export function RoutineJournal({
   const completedExercises = visibleEntries.filter((e) => e.completed).map((e) => e.exercise);
 
   const encouragementLine = encouragement[Math.floor(nowMs / 8000) % encouragement.length];
+  const exerciseDurationOptions = ["all", ...new Set(overviewStats.topExerciseDurations.map((item) => item.name))];
+  const filteredExerciseDurations =
+    exerciseDurationFilter === "all"
+      ? overviewStats.topExerciseDurations
+      : overviewStats.topExerciseDurations.filter((item) => item.name === exerciseDurationFilter);
 
   const ringR = 48;
   const ringCircumference = 2 * Math.PI * ringR;
@@ -2682,7 +3064,10 @@ export function RoutineJournal({
       return;
     }
     if (isBodybuilding) {
-      completeBodybuildingAndNext(currentWorkoutEntry.exercise);
+      const completed = completeBodybuildingAndNext(currentWorkoutEntry.exercise);
+      if (!completed) {
+        return;
+      }
       const nextFocus =
         displayEntries.find((entry) => entry.exercise !== currentWorkoutEntry.exercise && !entry.completed)
           ?.exercise ?? null;
@@ -2735,6 +3120,22 @@ export function RoutineJournal({
     1,
     ...overviewStats.topExercises.map((exerciseItem) => exerciseItem.count),
   );
+  const maxExerciseDuration = Math.max(
+    1,
+    ...overviewStats.topExerciseDurations.map((exerciseItem) => exerciseItem.seconds),
+  );
+  const maxRecentDuration = Math.max(
+    1,
+    ...overviewStats.recent7DurationSeconds.map((item) => item.seconds),
+  );
+  const maxVolumeValue = Math.max(
+    1,
+    ...overviewStats.volumeTrend.map((item) => item.value),
+  );
+  const maxCategoryValue = Math.max(
+    1,
+    ...overviewStats.categoryMix.map((item) => item.value),
+  );
   const latestWeight = overviewStats.weightDailySeries[overviewStats.weightDailySeries.length - 1]?.value ?? null;
   const avgLast7Weight =
     overviewStats.weightDailySeries.length === 0
@@ -2774,7 +3175,7 @@ export function RoutineJournal({
   const monthReduction = avgLast30Weight !== null && avgPrev30Weight !== null ? avgPrev30Weight - avgLast30Weight : null;
 
   return (
-    <section className="flex flex-1 flex-col gap-4 pb-32 sm:pb-28">
+    <section className="flex flex-1 flex-col gap-4 bg-[radial-gradient(circle_at_top,_rgba(45,212,191,0.14),transparent_44%)] pb-32 sm:pb-28">
       {activeTab === "lite" && hiddenLiteHero ? (
         <div className="overflow-hidden rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 via-orange-50 to-yellow-50 shadow-sm">
           <div className="relative h-64 w-full bg-rose-100 sm:h-72">
@@ -2796,21 +3197,21 @@ export function RoutineJournal({
           </div>
         </div>
       ) : (
-        <header className="rounded-2xl bg-gradient-to-r from-teal-700 via-emerald-700 to-cyan-700 p-5 text-white shadow-lg">
-          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-cyan-100">
+        <header className="rounded-[28px] bg-gradient-to-br from-slate-900 via-teal-900 to-emerald-700 p-5 text-white shadow-[0_18px_40px_rgba(13,148,136,0.18)] sm:p-6">
+          <p className="text-sm font-semibold uppercase tracking-[0.22em] text-cyan-100/90">
             Momentum Journal
           </p>
-          <h1 className="mt-1 text-2xl font-bold sm:text-3xl">
+          <h1 className="mt-2 text-2xl font-black tracking-[-0.04em] sm:text-3xl">
             Sportlich motivierend. Ruhig wie ein Tagebuch.
           </h1>
-          <p className="mt-2 text-sm font-medium text-cyan-50">
+          <p className="mt-2 text-sm font-medium text-cyan-50/90">
             {encouragement[new Date().getDate() % encouragement.length]}
           </p>
         </header>
       )}
 
       {showOfflineCopyButton || activeTab === "lite" ? (
-        <div className="flex gap-2 rounded-xl bg-slate-200 p-1.5 dark:bg-slate-800">
+        <div className="flex gap-2 rounded-2xl bg-[#e9f7f3] p-1.5 shadow-inner shadow-emerald-100 dark:bg-slate-800">
           <button
             type="button"
             onClick={() => {
@@ -2820,10 +3221,10 @@ export function RoutineJournal({
               setMinuteAlertedExercise(null);
               setActiveTab("cloud");
             }}
-            className={`touch-manipulation flex-1 rounded-lg px-3 py-2.5 text-[15px] font-semibold ${
+            className={`touch-manipulation flex-1 rounded-xl px-3 py-2.5 text-[15px] font-semibold transition ${
               activeTab === "cloud"
-                ? "bg-white text-teal-800 shadow dark:bg-slate-900 dark:text-teal-300"
-                : "text-slate-800 dark:text-slate-200"
+                ? "bg-white text-slate-900 shadow-sm ring-1 ring-teal-200 dark:bg-slate-900 dark:text-teal-300"
+                : "text-slate-700 dark:text-slate-200"
             }`}
           >
             Cloud Journal
@@ -2837,10 +3238,10 @@ export function RoutineJournal({
               setMinuteAlertedExercise(null);
               setActiveTab("lite");
             }}
-            className={`touch-manipulation flex-1 rounded-lg px-3 py-2.5 text-[15px] font-semibold ${
+            className={`touch-manipulation flex-1 rounded-xl px-3 py-2.5 text-[15px] font-semibold transition ${
               activeTab === "lite"
-                ? "bg-white text-teal-800 shadow dark:bg-slate-900 dark:text-teal-300"
-                : "text-slate-800 dark:text-slate-200"
+                ? "bg-white text-slate-900 shadow-sm ring-1 ring-teal-200 dark:bg-slate-900 dark:text-teal-300"
+                : "text-slate-700 dark:text-slate-200"
             }`}
           >
             Offline Kopie
@@ -2857,7 +3258,7 @@ export function RoutineJournal({
         </p>
       ) : null}
 
-      <div className="relative rounded-xl border border-slate-300 bg-slate-100/90 p-3 dark:border-slate-700 dark:bg-slate-900">
+      <div className="relative rounded-[24px] border border-slate-200 bg-white/90 p-3 shadow-[0_12px_28px_rgba(15,23,42,0.04)] dark:border-slate-700 dark:bg-slate-900">
         <div className="flex items-start justify-between gap-3">
           <div className="flex-1">
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-300">
@@ -3044,14 +3445,14 @@ export function RoutineJournal({
         ) : null}
       </div>
 
-      <div className="flex gap-2 rounded-xl bg-slate-200 p-1.5 dark:bg-slate-800">
+      <div className="flex gap-2 rounded-2xl bg-[#edf8f5] p-1.5 shadow-inner shadow-emerald-100 dark:bg-slate-800">
         <button
           type="button"
           onClick={() => setPageViewTab("training")}
-          className={`touch-manipulation flex-1 rounded-lg px-3 py-2.5 text-[15px] font-semibold ${
+          className={`touch-manipulation flex-1 rounded-xl px-3 py-2.5 text-[15px] font-semibold transition ${
             pageViewTab === "training"
-              ? "bg-white text-teal-800 shadow dark:bg-slate-900 dark:text-teal-300"
-              : "text-slate-800 dark:text-slate-200"
+              ? "bg-white text-slate-900 shadow-sm ring-1 ring-teal-200 dark:bg-slate-900 dark:text-teal-300"
+              : "text-slate-700 dark:text-slate-200"
           }`}
         >
           Übungen
@@ -3059,26 +3460,81 @@ export function RoutineJournal({
         <button
           type="button"
           onClick={() => setPageViewTab("dashboard")}
-          className={`touch-manipulation flex-1 rounded-lg px-3 py-2.5 text-[15px] font-semibold ${
+          className={`touch-manipulation flex-1 rounded-xl px-3 py-2.5 text-[15px] font-semibold transition ${
             pageViewTab === "dashboard"
-              ? "bg-white text-teal-800 shadow dark:bg-slate-900 dark:text-teal-300"
-              : "text-slate-800 dark:text-slate-200"
+              ? "bg-white text-slate-900 shadow-sm ring-1 ring-teal-200 dark:bg-slate-900 dark:text-teal-300"
+              : "text-slate-700 dark:text-slate-200"
           }`}
         >
           Activity Tracker
         </button>
       </div>
 
-      <div className="w-full max-w-full overflow-x-hidden rounded-xl border border-slate-300 bg-white p-3 shadow-sm dark:border-slate-700 dark:bg-slate-900 sm:p-4">
+      <div className="w-full max-w-full overflow-x-hidden rounded-[24px] border border-slate-200 bg-white/95 p-3 shadow-[0_12px_30px_rgba(15,23,42,0.04)] dark:border-slate-700 dark:bg-slate-900 sm:p-4">
         {pageViewTab === "dashboard" ? (
         <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-sm font-bold uppercase tracking-[0.14em] text-slate-700 dark:text-slate-200">
               Überblick
             </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200">
+                <span>Zeitraum</span>
+                <select
+                  value={dashboardRange}
+                  onChange={(event) => setDashboardRange(event.target.value as "7" | "30" | "90" | "all")}
+                  className="rounded border border-slate-300 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700 outline-none dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                >
+                  <option value="7">7 Tage</option>
+                  <option value="30">30 Tage</option>
+                  <option value="90">90 Tage</option>
+                  <option value="all">Gesamt</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200">
+                <span>Übung</span>
+                <select
+                  value={exerciseDurationFilter}
+                  onChange={(event) => setExerciseDurationFilter(event.target.value)}
+                  className="rounded border border-slate-300 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700 outline-none dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                >
+                  <option value="all">Alle</option>
+                  {exerciseDurationOptions
+                    .filter((option) => option !== "all")
+                    .map((option) => (
+                      <option key={`duration-filter-${option}`} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            </div>
             <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-800">
               {overviewStats.totalSessions} Sessions
             </span>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {([
+              ["weight", "Gewicht"],
+              ["duration", "Workoutdauer"],
+              ["volume", "Volumen"],
+              ["categoryMix", "Kategorien"],
+              ["consistency", "Konsistenz"],
+            ] as Array<[DashboardGraphKey, string]>).map(([key, label]) => (
+              <button
+                key={`graph-toggle-${key}`}
+                type="button"
+                onClick={() => toggleDashboardGraph(key)}
+                className={`touch-manipulation rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+                  dashboardGraphConfig[key]
+                    ? "border-teal-500 bg-teal-600 text-white"
+                    : "border-slate-300 bg-white text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+                }`}
+              >
+                {dashboardGraphConfig[key] ? "✓ " : "○ "}
+                {label}
+              </button>
+            ))}
           </div>
           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <div className="rounded-lg bg-emerald-50 p-3">
@@ -3126,49 +3582,62 @@ export function RoutineJournal({
                 {monthReduction !== null ? `${monthReduction > 0 ? "-" : "+"}${Math.abs(monthReduction).toFixed(1)} ${weightUnitLabel}` : "—"}
               </p>
             </div>
+            <div className="rounded-lg bg-lime-50 p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-lime-700">Gesamt Workoutzeit</p>
+              <p className="mt-2 text-sm font-black text-lime-900">
+                {formatDurationCompact(overviewStats.totalWorkoutSeconds)}
+              </p>
+            </div>
+            <div className="rounded-lg bg-orange-50 p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-orange-700">Ø Dauer pro Session</p>
+              <p className="mt-2 text-sm font-black text-orange-900">
+                {formatDurationCompact(overviewStats.avgWorkoutSeconds)}
+              </p>
+            </div>
           </div>
 
-          <div className="mt-4 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
-                Wochenview (Mo-So)
-              </p>
-              <div className="mt-2 grid grid-cols-7 gap-2">
-                {overviewStats.weekView.map((day) => (
-                  <button
-                    key={day.key}
-                    type="button"
-                    onClick={() => {
-                      setOverallStartedAtMs(null);
-                      setActiveExerciseTimer(null);
-                      setMorningFlowActive(false);
-                      setMinuteAlertedExercise(null);
-                      setBodybuildingFlowActive(false);
-                      setBodybuildingFocusExercise(null);
-                      setSelectedDate(day.key);
-                    }}
-                    className="rounded-lg border border-slate-200 bg-white p-2 text-center transition hover:border-teal-400 hover:bg-teal-50 dark:border-slate-700 dark:bg-slate-900 dark:hover:border-teal-500 dark:hover:bg-slate-800"
-                  >
-                    <div className="text-[10px] font-semibold uppercase text-slate-500 dark:text-slate-400">
-                      {new Date(`${day.key}T00:00:00`).toLocaleDateString("de-DE", { weekday: "short" })}
-                    </div>
-                    <div
-                      className={`mt-2 mx-auto flex h-10 w-10 items-center justify-center rounded-full text-xs font-black ${
-                        day.done ? "bg-emerald-500 text-white" : "bg-slate-200 text-slate-600"
-                      }`}
+          {dashboardGraphConfig.consistency ? (
+            <div className="mt-4 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
+                  Wochenview (Mo-So)
+                </p>
+                <div className="mt-2 grid grid-cols-7 gap-2">
+                  {overviewStats.weekView.map((day) => (
+                    <button
+                      key={day.key}
+                      type="button"
+                      onClick={() => {
+                        setOverallStartedAtMs(null);
+                        setActiveExerciseTimer(null);
+                        setMorningFlowActive(false);
+                        setMinuteAlertedExercise(null);
+                        setBodybuildingFlowActive(false);
+                        setBodybuildingFocusExercise(null);
+                        setSelectedDate(day.key);
+                      }}
+                      className="rounded-lg border border-slate-200 bg-white p-2 text-center transition hover:border-teal-400 hover:bg-teal-50 dark:border-slate-700 dark:bg-slate-900 dark:hover:border-teal-500 dark:hover:bg-slate-800"
                     >
-                      {day.done ? "✓" : "–"}
-                    </div>
-                    <div className="mt-1 text-[10px] font-semibold text-slate-500">{day.count}</div>
-                  </button>
-                ))}
+                      <div className="text-[10px] font-semibold uppercase text-slate-500 dark:text-slate-400">
+                        {new Date(`${day.key}T00:00:00`).toLocaleDateString("de-DE", { weekday: "short" })}
+                      </div>
+                      <div
+                        className={`mt-2 mx-auto flex h-10 w-10 items-center justify-center rounded-full text-xs font-black ${
+                          day.done ? "bg-emerald-500 text-white" : "bg-slate-200 text-slate-600"
+                        }`}
+                      >
+                        {day.done ? "✓" : "–"}
+                      </div>
+                      <div className="mt-1 text-[10px] font-semibold text-slate-500">{day.count}</div>
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
 
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
-                Häufigste Übungen
-              </p>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
+                  Häufigste Übungen
+                </p>
               <ul className="mt-2 space-y-2">
                 {overviewStats.topExercises.length === 0 ? (
                   <li className="text-sm text-slate-500">Noch keine erledigten Übungen gespeichert.</li>
@@ -3187,58 +3656,173 @@ export function RoutineJournal({
               </ul>
             </div>
           </div>
+          ) : null}
 
-          <div className="mt-4 grid gap-4 lg:grid-cols-2">
-            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
-                Gewichtstrend (14 Tage)
-              </p>
-              {weightTrendValues.length === 0 ? (
-                <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
-                  Noch keine Gewichts-Einträge vorhanden.
+          {dashboardGraphConfig.weight ? (
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
+                  Gewichtstrend ({dashboardRange === "all" ? "Gesamt" : `${dashboardRange} Tage`})
                 </p>
-              ) : (
-                <>
-                  <svg viewBox="0 0 300 110" className="mt-3 h-32 w-full">
-                    <line x1="12" y1="96" x2="288" y2="96" stroke="currentColor" className="text-slate-300 dark:text-slate-600" />
-                    <polyline
-                      fill="none"
-                      stroke="#0ea5e9"
-                      strokeWidth="2.5"
-                      points={weightChartPoints.map((point) => `${point.x},${point.y}`).join(" ")}
-                    />
-                    {weightChartPoints.map((point) => (
-                      <circle key={`weight-${point.key}`} cx={point.x} cy={point.y} r="3" fill="#0ea5e9" />
+                {weightTrendValues.length === 0 ? (
+                  <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                    Noch keine Gewichts-Einträge vorhanden.
+                  </p>
+                ) : (
+                  <>
+                    <svg viewBox="0 0 300 110" className="mt-3 h-32 w-full">
+                      <line x1="12" y1="96" x2="288" y2="96" stroke="currentColor" className="text-slate-300 dark:text-slate-600" />
+                      <polyline
+                        fill="none"
+                        stroke="#0ea5e9"
+                        strokeWidth="2.5"
+                        points={weightChartPoints.map((point) => `${point.x},${point.y}`).join(" ")}
+                      />
+                      {weightChartPoints.map((point) => (
+                        <circle key={`weight-${point.key}`} cx={point.x} cy={point.y} r="3" fill="#0ea5e9" />
+                      ))}
+                    </svg>
+                    <div className="mt-1 flex items-center justify-between text-xs font-medium text-slate-600 dark:text-slate-300">
+                      <span>{weightTrendValues[0]?.value} {weightUnitLabel}</span>
+                      <span>{weightTrendValues[weightTrendValues.length - 1]?.value} {weightUnitLabel}</span>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
+                  Übungsverteilung (Top 5)
+                </p>
+                {overviewStats.topExercises.length === 0 ? (
+                  <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                    Noch keine erledigten Übungen vorhanden.
+                  </p>
+                ) : (
+                  <div className="mt-3 space-y-2">
+                    {overviewStats.topExercises.map((exerciseItem) => (
+                      <div key={`exercise-bar-${exerciseItem.name}`}>
+                        <div className="mb-1 flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-200">
+                          <span className="truncate pr-2">{exerciseItem.name}</span>
+                          <span>{exerciseItem.count}x</span>
+                        </div>
+                        <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-700">
+                          <div
+                            className="h-2 rounded-full bg-emerald-500"
+                            style={{ width: `${Math.max(8, (exerciseItem.count / maxExerciseCount) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
                     ))}
-                  </svg>
-                  <div className="mt-1 flex items-center justify-between text-xs font-medium text-slate-600 dark:text-slate-300">
-                    <span>{weightTrendValues[0]?.value} {weightUnitLabel}</span>
-                    <span>{weightTrendValues[weightTrendValues.length - 1]?.value} {weightUnitLabel}</span>
                   </div>
-                </>
-              )}
+                )}
+              </div>
             </div>
+          ) : null}
 
-            <div className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
-                Übungsverteilung (Top 5)
-              </p>
-              {overviewStats.topExercises.length === 0 ? (
-                <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
-                  Noch keine erledigten Übungen vorhanden.
+          {dashboardGraphConfig.duration ? (
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
+                  Workoutdauer im Zeitraum
                 </p>
+                <div className="mt-3 grid grid-cols-7 gap-1">
+                  {overviewStats.recent7DurationSeconds.map((day) => (
+                    <div key={`duration-day-${day.key}`} className="flex flex-col items-center gap-1">
+                      <div className="flex h-20 w-full items-end rounded bg-slate-200 px-1 dark:bg-slate-700">
+                        <div
+                          className="w-full rounded bg-cyan-500"
+                          style={{ height: `${Math.max(6, (day.seconds / maxRecentDuration) * 100)}%` }}
+                        />
+                      </div>
+                      <p className="text-[10px] font-semibold text-slate-600 dark:text-slate-300">
+                        {new Date(`${day.key}T00:00:00`).toLocaleDateString("de-DE", { weekday: "short" })}
+                      </p>
+                      <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                        {formatDurationCompact(day.seconds)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
+                  Dauer pro Übung (Top 5)
+                </p>
+                {filteredExerciseDurations.length === 0 ? (
+                  <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                    {exerciseDurationFilter === "all"
+                      ? "Noch keine getrackte Übungsdauer vorhanden."
+                      : `Keine Daten für "${exerciseDurationFilter}" in diesem Zeitraum.`}
+                  </p>
+                ) : (
+                  <div className="mt-3 space-y-2">
+                    {filteredExerciseDurations.map((exerciseItem) => (
+                      <div key={`exercise-duration-${exerciseItem.name}`}>
+                        <div className="mb-1 flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-200">
+                          <span className="truncate pr-2">{exerciseItem.name}</span>
+                          <span>{formatDurationCompact(exerciseItem.seconds)}</span>
+                        </div>
+                        <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-700">
+                          <div
+                            className="h-2 rounded-full bg-indigo-500"
+                            style={{
+                              width: `${Math.max(8, (exerciseItem.seconds / maxExerciseDuration) * 100)}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : null}
+
+          {dashboardGraphConfig.volume ? (
+            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
+                Trainingsvolumen (Reps / 30 Tage)
+              </p>
+              <div className="mt-3 grid grid-cols-7 gap-1">
+                {overviewStats.volumeTrend.map((entry) => (
+                  <div key={`volume-day-${entry.key}`} className="flex flex-col items-center gap-1">
+                    <div className="flex h-20 w-full items-end rounded bg-slate-200 px-1 dark:bg-slate-700">
+                      <div
+                        className="w-full rounded bg-violet-500"
+                        style={{ height: `${Math.max(6, (entry.value / maxVolumeValue) * 100)}%` }}
+                      />
+                    </div>
+                    <p className="text-[10px] font-semibold text-slate-600 dark:text-slate-300">
+                      {new Date(`${entry.key}T00:00:00`).toLocaleDateString("de-DE", { day: "2-digit" })}
+                    </p>
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400">{entry.value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {dashboardGraphConfig.categoryMix ? (
+            <div className="mt-4 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
+                Kategorien-Verteilung
+              </p>
+              {overviewStats.categoryMix.length === 0 ? (
+                <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">Noch keine Kategorien erfasst.</p>
               ) : (
                 <div className="mt-3 space-y-2">
-                  {overviewStats.topExercises.map((exerciseItem) => (
-                    <div key={`exercise-bar-${exerciseItem.name}`}>
+                  {overviewStats.categoryMix.map((item) => (
+                    <div key={`category-mix-${item.name}`}>
                       <div className="mb-1 flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-200">
-                        <span className="truncate pr-2">{exerciseItem.name}</span>
-                        <span>{exerciseItem.count}x</span>
+                        <span>{item.name}</span>
+                        <span>{item.value}</span>
                       </div>
                       <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-700">
                         <div
-                          className="h-2 rounded-full bg-emerald-500"
-                          style={{ width: `${Math.max(8, (exerciseItem.count / maxExerciseCount) * 100)}%` }}
+                          className="h-2 rounded-full bg-amber-500"
+                          style={{ width: `${Math.max(8, (item.value / maxCategoryValue) * 100)}%` }}
                         />
                       </div>
                     </div>
@@ -3246,7 +3830,7 @@ export function RoutineJournal({
                 </div>
               )}
             </div>
-          </div>
+          ) : null}
 
           <div className="mt-4">
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
@@ -3637,7 +4221,7 @@ export function RoutineJournal({
                             min={0}
                             value={entry.sets}
                             onChange={(event) =>
-                              handleEntryChange(entry.exercise, { sets: event.target.value })
+                              handleSetCountChange(entry.exercise, event.target.value)
                             }
                             className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
                           />
@@ -3854,7 +4438,7 @@ export function RoutineJournal({
                                 min={0}
                                 value={entry.sets}
                                 onChange={(event) =>
-                                  handleEntryChange(entry.exercise, { sets: event.target.value })
+                                  handleSetCountChange(entry.exercise, event.target.value)
                                 }
                                 className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
                               />
@@ -3900,26 +4484,63 @@ export function RoutineJournal({
                             </label>
                           </div>
 
-                          {Number.parseInt(entry.sets || "0", 10) > 0 ? (
+                          {isBodybuilding && Number.parseInt(entry.sets || "0", 10) > 0 ? (
                             <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-2">
                               <p className="text-xs font-semibold text-emerald-900">
                                 Satz-Tracker: {entry.completedSets} / {entry.sets}
                               </p>
-                              <div className="mt-1 flex gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => updateCompletedSets(entry.exercise, -1)}
-                                  className="touch-manipulation rounded border border-emerald-600 px-2.5 py-1.5 text-xs font-semibold text-emerald-900"
-                                >
-                                  -1 Satz
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => updateCompletedSets(entry.exercise, 1)}
-                                  className="touch-manipulation rounded bg-emerald-700 px-2.5 py-1.5 text-xs font-semibold text-white"
-                                >
-                                  +1 Satz done
-                                </button>
+                              <div className="mt-2 space-y-2">
+                                {entry.setLogs.map((setLog, setIndex) => (
+                                  <div
+                                    key={`${entry.exercise}-set-${setIndex + 1}`}
+                                    className="grid gap-2 rounded-md border border-emerald-200 bg-white p-2 sm:grid-cols-[64px_1fr_1fr_auto]"
+                                  >
+                                    <span className="self-center text-xs font-semibold text-emerald-900">
+                                      Satz {setIndex + 1}
+                                    </span>
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      value={setLog.reps}
+                                      onChange={(event) =>
+                                        updateSetLogValue(
+                                          entry.exercise,
+                                          setIndex,
+                                          "reps",
+                                          event.target.value,
+                                        )
+                                      }
+                                      placeholder="Reps"
+                                      className="rounded-md border border-slate-400 px-2 py-1 text-xs text-slate-900"
+                                    />
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      step="0.5"
+                                      value={setLog.weightKg}
+                                      onChange={(event) =>
+                                        updateSetLogValue(
+                                          entry.exercise,
+                                          setIndex,
+                                          "weightKg",
+                                          event.target.value,
+                                        )
+                                      }
+                                      placeholder={`Gewicht ${weightUnitLabel}`}
+                                      className="rounded-md border border-slate-400 px-2 py-1 text-xs text-slate-900"
+                                    />
+                                    <label className="flex items-center gap-1 self-center text-xs font-semibold text-emerald-900">
+                                      <input
+                                        type="checkbox"
+                                        checked={setLog.done}
+                                        onChange={(event) =>
+                                          toggleSetDone(entry.exercise, setIndex, event.target.checked)
+                                        }
+                                      />
+                                      Done
+                                    </label>
+                                  </div>
+                                ))}
                               </div>
                             </div>
                           ) : null}
@@ -4298,6 +4919,55 @@ export function RoutineJournal({
                 Alle Übungen erledigt – super gemacht! 🎉
               </p>
             )}
+            {isMorningRoutine && showFlowCompletionPrompt ? (
+              <div className="mt-3 rounded-xl border border-emerald-300 bg-white p-3">
+                <p className="text-sm font-semibold text-emerald-900">
+                  Morning abgeschlossen - wie ging es dir heute?
+                </p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-[120px_1fr]">
+                  <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                    Score 0-10
+                    <input
+                      type="number"
+                      min={0}
+                      max={10}
+                      value={reflection.flowScore}
+                      onChange={(event) =>
+                        setReflection((current) => ({ ...current, flowScore: event.target.value }))
+                      }
+                      className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                    Freitext
+                    <textarea
+                      rows={2}
+                      value={reflection.flowJournal}
+                      onChange={(event) =>
+                        setReflection((current) => ({ ...current, flowJournal: event.target.value }))
+                      }
+                      className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
+                    />
+                  </label>
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={submitFlowCompletion}
+                    className="rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white"
+                  >
+                    Check-in speichern
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowFlowCompletionPrompt(false)}
+                    className="rounded-lg border border-emerald-700 px-3 py-1.5 text-xs font-semibold text-emerald-900"
+                  >
+                    Später
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -4317,7 +4987,11 @@ export function RoutineJournal({
               value={reflection.mood}
               onChange={(event) => {
                 const mood = event.target.value;
-                setReflection({ mood, text: moodTemplates[mood] ?? reflection.text });
+                setReflection((current) => ({
+                  ...current,
+                  mood,
+                  text: moodTemplates[mood] ?? current.text,
+                }));
               }}
               className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
             >
@@ -4347,6 +5021,34 @@ export function RoutineJournal({
                 </button>
               ) : null}
             </div>
+          </div>
+
+          <div className="mt-2 grid gap-2 sm:grid-cols-[120px_1fr]">
+            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+              Morning Score (0-10)
+              <input
+                type="number"
+                min={0}
+                max={10}
+                value={reflection.flowScore}
+                onChange={(event) =>
+                  setReflection((current) => ({ ...current, flowScore: event.target.value }))
+                }
+                className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+              Kurzer Morning Check-in
+              <textarea
+                value={reflection.flowJournal}
+                onChange={(event) =>
+                  setReflection((current) => ({ ...current, flowJournal: event.target.value }))
+                }
+                rows={2}
+                placeholder="Wie ging es dir heute im Morning Flow?"
+                className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
+              />
+            </label>
           </div>
 
           {showJournalArchive && (
@@ -4618,7 +5320,7 @@ export function RoutineJournal({
                               min={0}
                               value={entry.sets}
                               onChange={(event) =>
-                                handleEntryChange(entry.exercise, { sets: event.target.value })
+                                handleSetCountChange(entry.exercise, event.target.value)
                               }
                               className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
                             />
@@ -4668,7 +5370,7 @@ export function RoutineJournal({
                               min={0}
                               value={entry.sets}
                               onChange={(event) =>
-                                handleEntryChange(entry.exercise, { sets: event.target.value })
+                                handleSetCountChange(entry.exercise, event.target.value)
                               }
                               className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
                             />
@@ -4701,26 +5403,58 @@ export function RoutineJournal({
                         </>
                       )}
                     </div>
-                    {Number.parseInt(entry.sets || "0", 10) > 0 ? (
+                    {isBodybuilding && Number.parseInt(entry.sets || "0", 10) > 0 ? (
                       <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-2">
                         <p className="text-xs font-semibold text-emerald-900">
                           Satz-Tracker: {entry.completedSets} / {entry.sets}
                         </p>
-                        <div className="mt-1 flex gap-2">
-                          <button
-                            type="button"
-                            onClick={() => updateCompletedSets(entry.exercise, -1)}
-                            className="rounded border border-emerald-600 px-2 py-1 text-xs font-semibold text-emerald-900"
-                          >
-                            -1 Satz
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => updateCompletedSets(entry.exercise, 1)}
-                            className="rounded bg-emerald-700 px-2 py-1 text-xs font-semibold text-white"
-                          >
-                            +1 Satz done
-                          </button>
+                        <div className="mt-2 space-y-2">
+                          {entry.setLogs.map((setLog, setIndex) => (
+                            <div
+                              key={`${entry.exercise}-set-legacy-${setIndex + 1}`}
+                              className="grid gap-2 rounded-md border border-emerald-200 bg-white p-2 sm:grid-cols-[64px_1fr_1fr_auto]"
+                            >
+                              <span className="self-center text-xs font-semibold text-emerald-900">
+                                Satz {setIndex + 1}
+                              </span>
+                              <input
+                                type="number"
+                                min={1}
+                                value={setLog.reps}
+                                onChange={(event) =>
+                                  updateSetLogValue(entry.exercise, setIndex, "reps", event.target.value)
+                                }
+                                placeholder="Reps"
+                                className="rounded-md border border-slate-400 px-2 py-1 text-xs text-slate-900"
+                              />
+                              <input
+                                type="number"
+                                min={0}
+                                step="0.5"
+                                value={setLog.weightKg}
+                                onChange={(event) =>
+                                  updateSetLogValue(
+                                    entry.exercise,
+                                    setIndex,
+                                    "weightKg",
+                                    event.target.value,
+                                  )
+                                }
+                                placeholder={`Gewicht ${weightUnitLabel}`}
+                                className="rounded-md border border-slate-400 px-2 py-1 text-xs text-slate-900"
+                              />
+                              <label className="flex items-center gap-1 self-center text-xs font-semibold text-emerald-900">
+                                <input
+                                  type="checkbox"
+                                  checked={setLog.done}
+                                  onChange={(event) =>
+                                    toggleSetDone(entry.exercise, setIndex, event.target.checked)
+                                  }
+                                />
+                                Done
+                              </label>
+                            </div>
+                          ))}
                         </div>
                       </div>
                     ) : null}
