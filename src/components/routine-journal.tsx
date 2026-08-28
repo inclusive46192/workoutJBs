@@ -16,7 +16,7 @@ type RoutineJournalProps = {
 };
 
 type JournalTab = "cloud" | "lite";
-type PageViewTab = "training" | "dashboard";
+type PageViewTab = "training" | "builder" | "dashboard";
 
 type EntryState = {
   exercise: string;
@@ -132,15 +132,7 @@ const encouragement = [
   "Sanfte Disziplin ist starke Disziplin.",
 ];
 
-const moodTemplates: Record<string, string> = {
-  "Fokussiert": "Ich starte klar und konzentriert. Heute setze ich eine kleine, starke Gewohnheit.",
-  "Energielos": "Ich halte es leicht und beginne mit kleinen Schritten. Bewegung bringt Energie in Fahrt.",
-  "Gestresst": "Ich atme ruhig ein und aus. Mit jeder Übung lasse ich Druck los.",
-  "Dankbar": "Ich nehme bewusst wahr, was heute schon gut ist, und starte positiv in den Tag.",
-  "Neutral": "Ich checke kurz meinen Körper und Geist ein und bewege mich mit Ruhe weiter.",
-};
-
-const moodOptions = Object.keys(moodTemplates);
+const scoreChoices = Array.from({ length: 11 }, (_, idx) => idx);
 const customExercisesStorageKey = "momentum-config:custom-exercises:v1";
 const hiddenExercisesStorageKey = "momentum-config:hidden-exercises:v1";
 const exerciseOrderStorageKey = "momentum-config:exercise-order:v1";
@@ -152,6 +144,7 @@ const routineComposerStorageKey = "momentum-builder:routine-composer:v1";
 const lastQuickLoadStorageKey = "momentum-quickload:last-by-category:v1";
 const profileStorageKey = "momentum-profile:v1";
 const dashboardGraphConfigStorageKey = "momentum-dashboard:graph-config:v1";
+const bodyWeightStorageKeyPrefix = "momentum-bodyweight:";
 const defaultDashboardGraphConfig: Record<DashboardGraphKey, boolean> = {
   weight: true,
   duration: true,
@@ -362,6 +355,10 @@ function localStorageKey(dateKey: string, category: string): string {
   return `momentum-lite:${dateKey}:${category}`;
 }
 
+function bodyWeightStorageKey(dateKey: string): string {
+  return `${bodyWeightStorageKeyPrefix}${dateKey}`;
+}
+
 function buildDefaultEntries(exercises: string[]): EntryState[] {
   return exercises.map((exercise) => ({
     exercise,
@@ -380,8 +377,8 @@ function buildDefaultEntries(exercises: string[]): EntryState[] {
 
 function buildDefaultReflection(): ReflectionState {
   return {
-    mood: "Neutral",
-    text: moodTemplates["Neutral"],
+    mood: "",
+    text: "",
     flowScore: "",
     flowJournal: "",
   };
@@ -655,6 +652,8 @@ export function RoutineJournal({
     }
   });
   const [newExerciseName, setNewExerciseName] = useState("");
+  const [quickAddExercise, setQuickAddExercise] = useState("");
+  const [bodyWeightKg, setBodyWeightKg] = useState("");
   const [dashboardRange, setDashboardRange] = useState<"7" | "30" | "90" | "all">("7");
   const [exerciseDurationFilter, setExerciseDurationFilter] = useState<string>("all");
   const [dashboardGraphConfig, setDashboardGraphConfig] = useState<Record<DashboardGraphKey, boolean>>(() => {
@@ -716,7 +715,6 @@ export function RoutineJournal({
   const [routineComposerByCategory, setRoutineComposerByCategory] = useState<Record<string, string[]>>(
     {},
   );
-  const [showBuilderPanel, setShowBuilderPanel] = useState(false);
   const [selectedBuilderMuscleGroup, setSelectedBuilderMuscleGroup] =
     useState<BuilderMuscleGroup>("Alle");
   const [showAdvancedBuilderFields, setShowAdvancedBuilderFields] = useState(false);
@@ -928,6 +926,27 @@ export function RoutineJournal({
     setShowFlowCompletionPrompt(false);
   }, [selectedCategory, selectedDate]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const storedWeight = window.localStorage.getItem(bodyWeightStorageKey(selectedDate)) ?? "";
+    setBodyWeightKg(storedWeight);
+  }, [selectedDate]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const storageKey = bodyWeightStorageKey(selectedDate);
+    const trimmedWeight = bodyWeightKg.trim();
+    if (!trimmedWeight) {
+      window.localStorage.removeItem(storageKey);
+      return;
+    }
+    window.localStorage.setItem(storageKey, trimmedWeight);
+  }, [bodyWeightKg, selectedDate]);
+
   const overviewStats = useMemo(() => {
     if (typeof window === "undefined") {
       return {
@@ -986,6 +1005,21 @@ export function RoutineJournal({
 
     const localKeys = Object.keys(localStorage);
     for (const key of localKeys) {
+      if (key.startsWith(bodyWeightStorageKeyPrefix)) {
+        const dateKey = key.replace(bodyWeightStorageKeyPrefix, "");
+        if (dashboardRange !== "all" && !activeRangeSet.has(dateKey)) {
+          continue;
+        }
+        const rawBodyWeight = localStorage.getItem(key) ?? "";
+        const parsedBodyWeight = Number.parseFloat(rawBodyWeight);
+        if (!Number.isNaN(parsedBodyWeight) && parsedBodyWeight > 0) {
+          const existing = weightByDay.get(dateKey) ?? [];
+          existing.push(parsedBodyWeight);
+          weightByDay.set(dateKey, existing);
+        }
+        continue;
+      }
+
       if (!key.startsWith("momentum-lite:")) {
         continue;
       }
@@ -1129,7 +1163,7 @@ export function RoutineJournal({
         done: dayDone.get(key) ?? false,
       })),
     };
-  }, [dashboardRange, selectedDate]);
+  }, [bodyWeightKg, dashboardRange, selectedDate]);
 
   const toggleDashboardGraph = (key: DashboardGraphKey) => {
     setDashboardGraphConfig((current) => ({
@@ -1154,6 +1188,16 @@ export function RoutineJournal({
   const allExercisesForCategory = useMemo(() => {
     return Array.from(new Set([...baseExercises, ...customExercises]));
   }, [baseExercises, customExercises]);
+  const globalExerciseOptions = useMemo(() => {
+    const exerciseSet = new Set<string>();
+    categories.forEach((category) => {
+      category.exercises.forEach((exercise) => exerciseSet.add(exercise));
+    });
+    Object.values(customExercisesByCategory).forEach((exerciseList) => {
+      exerciseList.forEach((exercise) => exerciseSet.add(exercise));
+    });
+    return Array.from(exerciseSet).sort((a, b) => a.localeCompare(b));
+  }, [categories, customExercisesByCategory]);
 
   const orderedExercisesForCategory = useMemo(() => {
     const preferredOrder = exerciseOrderByCategory[selectedCategory] ?? [];
@@ -1404,8 +1448,8 @@ export function RoutineJournal({
 
       setReflection(
         normalizeReflection({
-          mood: reflectionResult.data?.mood ?? "Neutral",
-          text: reflectionResult.data?.reflection ?? moodTemplates["Neutral"],
+          mood: reflectionResult.data?.mood ?? "",
+          text: reflectionResult.data?.reflection ?? "",
           flowScore:
             reflectionResult.data?.flow_score === null ||
             reflectionResult.data?.flow_score === undefined
@@ -1746,8 +1790,8 @@ export function RoutineJournal({
     });
   };
 
-  const addCustomExercise = () => {
-    const trimmed = newExerciseName.trim();
+  const addCustomExercise = (nameOverride?: string) => {
+    const trimmed = (nameOverride ?? newExerciseName).trim();
     if (!trimmed) {
       setErrorText("Bitte zuerst einen Übungsnamen eingeben.");
       return;
@@ -1782,7 +1826,11 @@ export function RoutineJournal({
         notes: "",
       },
     ]);
-    setNewExerciseName("");
+    if (nameOverride) {
+      setQuickAddExercise("");
+    } else {
+      setNewExerciseName("");
+    }
     setStatusText(`Übung "${trimmed}" hinzugefügt.`);
     setErrorText("");
   };
@@ -2746,7 +2794,7 @@ export function RoutineJournal({
       appendJournalArchive({
         dateKey: selectedDate,
         category: selectedCategory,
-        mood: reflection.mood,
+        mood: reflection.flowScore ? `Score ${reflection.flowScore}` : "Score -",
         text: reflection.text.trim(),
       });
     }
@@ -2826,11 +2874,11 @@ export function RoutineJournal({
         user_id: session.user.id,
         entry_date: selectedDate,
         category: selectedCategory,
-        mood: reflection.mood,
+        mood: reflection.flowScore ? `Score ${reflection.flowScore}` : "Check-in",
         reflection: reflection.text.trim(),
         overall_seconds: overallLiveSeconds,
         flow_score: parsePositiveInt(reflection.flowScore),
-        flow_note: reflection.flowJournal.trim(),
+        flow_note: reflection.text.trim(),
       },
       { onConflict: "user_id,entry_date,category" },
     );
@@ -2844,7 +2892,7 @@ export function RoutineJournal({
           user_id: session.user.id,
           entry_date: selectedDate,
           category: selectedCategory,
-          mood: reflection.mood,
+          mood: reflection.flowScore ? `Score ${reflection.flowScore}` : "Check-in",
           reflection: reflection.text.trim(),
           overall_seconds: overallLiveSeconds,
         },
@@ -2869,7 +2917,7 @@ export function RoutineJournal({
       appendJournalArchive({
         dateKey: selectedDate,
         category: selectedCategory,
-        mood: reflection.mood,
+        mood: reflection.flowScore ? `Score ${reflection.flowScore}` : "Score -",
         text: reflection.text.trim(),
       });
     }
@@ -3000,8 +3048,6 @@ export function RoutineJournal({
     ];
   }, [bodybuildingFocusExercise, isBodybuilding, visibleEntries]);
 
-  const quickLoadFavorites = (favoritesByCategory[selectedCategory] ?? []).slice().reverse();
-  const quickLoadBuilders = (workoutBuilderTemplates[selectedCategory] ?? []).slice().reverse();
   const routineComposerSelection = routineComposerByCategory[selectedCategory] ?? [];
   const categoryLastQuickLoad = lastQuickLoadByCategory[selectedCategory] ?? null;
   const currentWorkoutExercise =
@@ -3019,6 +3065,25 @@ export function RoutineJournal({
         (entry) => entry.exercise !== currentWorkoutExercise && !entry.completed,
       )?.exercise ?? null
     : null;
+
+  useEffect(() => {
+    const templates = workoutBuilderTemplates[selectedCategory] ?? [];
+    if (templates.length === 0) {
+      setSelectedWorkoutBuilderName("");
+      return;
+    }
+    const lastBuilder =
+      categoryLastQuickLoad?.type === "builder" ? categoryLastQuickLoad.name : "";
+    if (lastBuilder && templates.some((template) => template.name === lastBuilder)) {
+      setSelectedWorkoutBuilderName(lastBuilder);
+      return;
+    }
+    setSelectedWorkoutBuilderName((current) =>
+      current && templates.some((template) => template.name === current)
+        ? current
+        : templates[templates.length - 1]?.name ?? "",
+    );
+  }, [categoryLastQuickLoad, selectedCategory, workoutBuilderTemplates]);
 
   useEffect(() => {
     if (isFlowCategory || displayEntries.length === 0) {
@@ -3455,7 +3520,18 @@ export function RoutineJournal({
               : "text-slate-700 dark:text-slate-200"
           }`}
         >
-          Übungen
+          Workout
+        </button>
+        <button
+          type="button"
+          onClick={() => setPageViewTab("builder")}
+          className={`touch-manipulation flex-1 rounded-xl px-3 py-2.5 text-[15px] font-semibold transition ${
+            pageViewTab === "builder"
+              ? "bg-white text-slate-900 shadow-sm ring-1 ring-teal-200 dark:bg-slate-900 dark:text-teal-300"
+              : "text-slate-700 dark:text-slate-200"
+          }`}
+        >
+          Builder
         </button>
         <button
           type="button"
@@ -3869,9 +3945,9 @@ export function RoutineJournal({
 
         ) : null}
 
-        {pageViewTab === "training" ? (
+        {pageViewTab === "training" || pageViewTab === "builder" ? (
         <>
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-4">
           <label className="flex flex-col gap-1 text-sm font-medium text-slate-900 dark:text-slate-100">
             Datum
             <input
@@ -3936,74 +4012,64 @@ export function RoutineJournal({
               ))}
             </select>
           </label>
+          <label className="flex flex-col gap-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+            Körpergewicht ({weightUnitLabel})
+            <input
+              type="number"
+              min={0}
+              step="0.1"
+              value={bodyWeightKg}
+              onChange={(event) => setBodyWeightKg(event.target.value)}
+              placeholder="z. B. 82.4"
+              className="rounded-lg border border-slate-400 px-3 py-2.5 text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+            />
+          </label>
         </div>
 
+        {pageViewTab === "training" ? (
+          <div className="mt-4 rounded-xl border border-slate-300 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
+              Workout Auswahl
+            </p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+              <select
+                value={selectedWorkoutBuilderName}
+                onChange={(event) => {
+                  const nextName = event.target.value;
+                  setSelectedWorkoutBuilderName(nextName);
+                  if (nextName) {
+                    loadWorkoutBuilderTemplate(nextName);
+                  }
+                }}
+                className="rounded-md border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+              >
+                <option value="">Workout-Builder wählen</option>
+                {(workoutBuilderTemplates[selectedCategory] ?? []).map((template) => (
+                  <option key={`${template.category}-${template.name}`} value={template.name}>
+                    {template.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => loadWorkoutBuilderTemplate()}
+                className="touch-manipulation rounded-lg border border-teal-700 px-3 py-2.5 text-sm font-semibold text-teal-800 dark:text-teal-300"
+              >
+                Laden
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {pageViewTab === "builder" ? (
         <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50/80 p-3 dark:border-teal-900 dark:bg-teal-950/30">
         <p className="text-sm font-semibold text-teal-900 dark:text-teal-200">
           Routine Builder ({selectedCategory})
           </p>
         <p className="mt-1 text-xs text-teal-800 dark:text-teal-300">
-          Stelle hier deine Routine zusammen. Das aktive Workout läuft separat im Bereich darunter.
+          Stelle hier deine Routine zusammen. Das aktive Workout läuft im Tab "Workout".
           </p>
-          <button
-            type="button"
-            onClick={() => setShowBuilderPanel((current) => !current)}
-            className="mt-2 touch-manipulation rounded-lg border border-teal-300 bg-slate-100 px-3 py-1.5 text-xs font-semibold text-teal-800 dark:border-teal-800 dark:bg-slate-900 dark:text-teal-300"
-          >
-            {showBuilderPanel ? "Builder ausblenden" : "Builder anzeigen"}
-          </button>
-          {showBuilderPanel ? (
-            <>
-        <div className="mt-2 rounded-lg border border-teal-200 bg-slate-100 p-2 dark:border-teal-900 dark:bg-slate-900">
-          <p className="text-xs font-semibold uppercase tracking-wide text-teal-800 dark:text-teal-300">
-              Quick Start
-            </p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={loadLastQuickLoad}
-                disabled={!categoryLastQuickLoad}
-                className="touch-manipulation rounded-full bg-teal-700 px-3 py-1.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                ⚡ Zuletzt genutzt laden
-                {categoryLastQuickLoad ? ` (${categoryLastQuickLoad.name})` : ""}
-              </button>
-              {quickLoadFavorites.slice(0, 3).map((favorite) => (
-                <button
-                  key={`quick-favorite-${favorite.name}`}
-                  type="button"
-                  onClick={() => loadCategoryFavorite(favorite.name)}
-                  className="touch-manipulation rounded-full border border-amber-300 bg-amber-50 px-3 py-1.5 text-sm font-semibold text-amber-900"
-                >
-                  ☆ {favorite.name}
-                </button>
-              ))}
-              {quickLoadBuilders.slice(0, 2).map((builder) => (
-                <button
-                  key={`quick-builder-${builder.name}`}
-                  type="button"
-                  onClick={() => loadWorkoutBuilderTemplate(builder.name)}
-                  className="touch-manipulation rounded-full border border-teal-300 bg-teal-50 px-3 py-1.5 text-sm font-semibold text-teal-900"
-                >
-                  ⚙ {builder.name}
-                </button>
-              ))}
-              {isBodybuilding
-                ? Object.keys(bodybuildingPlanMap)
-                    .slice(0, 2)
-                    .map((planName) => (
-                      <button
-                        key={`quick-bb-plan-${planName}`}
-                        type="button"
-                        onClick={() => applyPresetBodybuildingPlan(planName)}
-                        className="touch-manipulation rounded-full border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-sm font-semibold text-indigo-900"
-                      >
-                        🏋 {planName}
-                      </button>
-                    ))
-                : null}
-            </div>
-          </div>
+          <>
           <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
             <input
               value={workoutBuilderName}
@@ -4318,10 +4384,10 @@ export function RoutineJournal({
             })}
           </div>
         </>
-        ) : null}
         </div>
+        ) : null}
 
-        {!isFlowCategory ? (
+        {pageViewTab === "training" && !isFlowCategory ? (
           <div className="mt-4 rounded-xl border border-slate-300 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
             <div className="flex items-center justify-between gap-2">
               <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Aktives Workout</p>
@@ -4558,61 +4624,7 @@ export function RoutineJournal({
           </div>
         ) : null}
 
-        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
-          <p className="text-sm font-semibold text-amber-900">Favoriten (Quick Load)</p>
-          <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
-            <input
-              value={newFavoriteName}
-              onChange={(event) => setNewFavoriteName(event.target.value)}
-              placeholder="Favoritenname"
-              className="rounded-md border border-amber-300 bg-white px-2 py-2 text-sm text-slate-900"
-            />
-            <button
-              type="button"
-              onClick={saveCategoryFavorite}
-              className="rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-white"
-            >
-              Als Favorit speichern
-            </button>
-          </div>
-          <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
-            <select
-              value={selectedFavoriteName}
-              onChange={(event) => setSelectedFavoriteName(event.target.value)}
-              className="rounded-md border border-amber-300 bg-white px-2 py-2 text-sm text-slate-900"
-            >
-              <option value="">Favorit wählen</option>
-              {(favoritesByCategory[selectedCategory] ?? []).map((favorite) => (
-                <option key={`${favorite.category}-${favorite.name}`} value={favorite.name}>
-                  {favorite.name}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={() => loadCategoryFavorite()}
-              className="rounded-lg border border-amber-600 px-3 py-2 text-sm font-semibold text-amber-800"
-            >
-              Laden
-            </button>
-          </div>
-          {quickLoadFavorites.length > 0 ? (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {quickLoadFavorites.slice(0, 6).map((favorite) => (
-                <button
-                  key={`favorite-chip-${favorite.name}`}
-                  type="button"
-                  onClick={() => loadCategoryFavorite(favorite.name)}
-                  className="rounded-full border border-amber-300 bg-white px-2.5 py-1 text-xs font-semibold text-amber-900"
-                >
-                  ⚡ {favorite.name}
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </div>
-
-        {isHitWorkout ? (
+        {pageViewTab === "training" && isHitWorkout ? (
           <div className="mt-4 rounded-xl border border-fuchsia-200 bg-fuchsia-50 p-3">
             <p className="text-sm font-semibold text-fuchsia-900">HIT Runden & Workout-Set</p>
             <div className="mt-2 grid gap-2 sm:grid-cols-3">
@@ -4694,11 +4706,14 @@ export function RoutineJournal({
           </div>
         ) : null}
 
-        <div className="mt-4 rounded-lg bg-emerald-100 px-3 py-2 text-sm font-medium text-emerald-950">
-          Tagesfortschritt: <strong>{completedCount}</strong> / {visibleEntries.length} erledigt (
-          {completionPercent}%)
-        </div>
+        {pageViewTab === "training" ? (
+          <div className="mt-4 rounded-lg bg-emerald-100 px-3 py-2 text-sm font-medium text-emerald-950">
+            Tagesfortschritt: <strong>{completedCount}</strong> / {visibleEntries.length} erledigt (
+            {completionPercent}%)
+          </div>
+        ) : null}
 
+        {pageViewTab === "training" ? (
         <div className="mt-4 rounded-xl border border-cyan-200 bg-cyan-50 p-3">
           <p className="text-sm font-semibold text-cyan-950">Overall Timer</p>
           <p className="mt-1 text-2xl font-bold text-cyan-900">{formatSeconds(overallLiveSeconds)}</p>
@@ -4740,8 +4755,9 @@ export function RoutineJournal({
             </button>
           </div>
         </div>
+        ) : null}
 
-        {isFlowCategory ? (
+        {pageViewTab === "training" && isFlowCategory ? (
           <div className="mt-4 rounded-xl border border-emerald-300 bg-emerald-50 p-3 dark:border-emerald-900 dark:bg-emerald-950/30">
             <div className="flex items-center justify-between gap-2">
               <p className="text-sm font-semibold text-emerald-950">
@@ -4924,28 +4940,35 @@ export function RoutineJournal({
                 <p className="text-sm font-semibold text-emerald-900">
                   Morning abgeschlossen - wie ging es dir heute?
                 </p>
-                <div className="mt-2 grid gap-2 sm:grid-cols-[120px_1fr]">
-                  <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
-                    Score 0-10
-                    <input
-                      type="number"
-                      min={0}
-                      max={10}
-                      value={reflection.flowScore}
-                      onChange={(event) =>
-                        setReflection((current) => ({ ...current, flowScore: event.target.value }))
-                      }
-                      className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
-                    />
-                  </label>
-                  <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                <div className="mt-2">
+                  <p className="text-xs font-semibold text-slate-700">Score 0-10</p>
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {scoreChoices.map((score) => (
+                      <button
+                        key={`flow-score-${score}`}
+                        type="button"
+                        onClick={() =>
+                          setReflection((current) => ({ ...current, flowScore: String(score) }))
+                        }
+                        className={`rounded-full px-2.5 py-1 text-xs font-bold ${
+                          reflection.flowScore === String(score)
+                            ? "bg-emerald-600 text-white"
+                            : "border border-slate-300 bg-slate-50 text-slate-700"
+                        }`}
+                      >
+                        {score}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="mt-2 flex flex-col gap-1 text-xs font-medium text-slate-900">
                     Freitext
                     <textarea
                       rows={2}
-                      value={reflection.flowJournal}
+                      value={reflection.text}
                       onChange={(event) =>
-                        setReflection((current) => ({ ...current, flowJournal: event.target.value }))
+                        setReflection((current) => ({ ...current, text: event.target.value }))
                       }
+                      placeholder="Kurzer Check-in ..."
                       className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
                     />
                   </label>
@@ -4971,9 +4994,10 @@ export function RoutineJournal({
           </div>
         ) : null}
 
+        {pageViewTab === "training" ? (
         <div className="mt-4 rounded-xl border border-slate-300 bg-slate-50 p-3">
           <div className="flex items-center justify-between gap-2">
-            <p className="text-sm font-semibold text-slate-900">Stimmung & Tagesjournal</p>
+            <p className="text-sm font-semibold text-slate-900">Tages-Check-in</p>
             <button
               type="button"
               onClick={() => setShowJournalArchive((v) => !v)}
@@ -4982,73 +5006,48 @@ export function RoutineJournal({
               📖 Archiv {showJournalArchive ? "ausblenden" : "anzeigen"}
             </button>
           </div>
-          <div className="mt-2 grid gap-2 sm:grid-cols-[220px_1fr]">
-            <select
-              value={reflection.mood}
-              onChange={(event) => {
-                const mood = event.target.value;
-                setReflection((current) => ({
-                  ...current,
-                  mood,
-                  text: moodTemplates[mood] ?? current.text,
-                }));
-              }}
-              className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
-            >
-              {moodOptions.map((mood) => (
-                <option key={mood} value={mood}>
-                  {mood}
-                </option>
-              ))}
-            </select>
-            <div className="relative">
-              <textarea
-                value={reflection.text}
-                onChange={(event) =>
-                  setReflection((current) => ({ ...current, text: event.target.value }))
-                }
-                rows={3}
-                className="w-full rounded-md border border-slate-400 px-2 py-2 pr-8 text-sm text-slate-900"
-              />
-              {reflection.text ? (
+          <div className="mt-2">
+            <p className="text-xs font-semibold text-slate-700">
+              Score (0 = letzter Kraftakt, 10 = super gut)
+            </p>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {scoreChoices.map((score) => (
                 <button
+                  key={`journal-score-${score}`}
                   type="button"
-                  onClick={() => setReflection((c) => ({ ...c, text: "" }))}
-                  title="Text löschen"
-                  className="absolute right-2 top-2 text-xs font-bold text-rose-500 hover:text-rose-700"
+                  onClick={() => setReflection((current) => ({ ...current, flowScore: String(score) }))}
+                  className={`rounded-full px-2.5 py-1 text-xs font-bold ${
+                    reflection.flowScore === String(score)
+                      ? "bg-cyan-600 text-white"
+                      : "border border-slate-300 bg-white text-slate-700"
+                  }`}
                 >
-                  ✕
+                  {score}
                 </button>
-              ) : null}
+              ))}
             </div>
           </div>
 
-          <div className="mt-2 grid gap-2 sm:grid-cols-[120px_1fr]">
-            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
-              Morning Score (0-10)
-              <input
-                type="number"
-                min={0}
-                max={10}
-                value={reflection.flowScore}
-                onChange={(event) =>
-                  setReflection((current) => ({ ...current, flowScore: event.target.value }))
-                }
-                className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
-              Kurzer Morning Check-in
-              <textarea
-                value={reflection.flowJournal}
-                onChange={(event) =>
-                  setReflection((current) => ({ ...current, flowJournal: event.target.value }))
-                }
-                rows={2}
-                placeholder="Wie ging es dir heute im Morning Flow?"
-                className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
-              />
-            </label>
+          <div className="mt-2 relative">
+            <textarea
+              value={reflection.text}
+              onChange={(event) =>
+                setReflection((current) => ({ ...current, text: event.target.value }))
+              }
+              rows={3}
+              placeholder="Freitext: Wie war dein Tag/Flow?"
+              className="w-full rounded-md border border-slate-400 px-2 py-2 pr-8 text-sm text-slate-900"
+            />
+            {reflection.text ? (
+              <button
+                type="button"
+                onClick={() => setReflection((c) => ({ ...c, text: "" }))}
+                title="Text löschen"
+                className="absolute right-2 top-2 text-xs font-bold text-rose-500 hover:text-rose-700"
+              >
+                ✕
+              </button>
+            ) : null}
           </div>
 
           {showJournalArchive && (
@@ -5105,7 +5104,9 @@ export function RoutineJournal({
             </div>
           )}
         </div>
+        ) : null}
 
+        {pageViewTab === "builder" ? (
         <div className="mt-4 rounded-xl border border-slate-300 bg-slate-50 p-3">
           <p className="text-sm font-semibold text-slate-900">Übungen verwalten</p>
           <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
@@ -5117,10 +5118,31 @@ export function RoutineJournal({
             />
             <button
               type="button"
-              onClick={addCustomExercise}
+              onClick={() => addCustomExercise()}
               className="rounded-lg bg-slate-800 px-3 py-2 text-sm font-semibold text-white"
             >
               Hinzufügen
+            </button>
+          </div>
+          <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+            <select
+              value={quickAddExercise}
+              onChange={(event) => setQuickAddExercise(event.target.value)}
+              className="rounded-md border border-slate-400 bg-white px-2 py-2 text-sm text-slate-900"
+            >
+              <option value="">Übung aus Katalog wählen</option>
+              {globalExerciseOptions.map((exercise) => (
+                <option key={`quick-add-${exercise}`} value={exercise}>
+                  {exercise}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => addCustomExercise(quickAddExercise)}
+              className="rounded-lg border border-slate-500 px-3 py-2 text-sm font-semibold text-slate-800"
+            >
+              Übernehmen
             </button>
           </div>
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -5154,7 +5176,9 @@ export function RoutineJournal({
             })}
           </div>
         </div>
+        ) : null}
 
+        {pageViewTab === "builder" ? (
         <div className="mt-4">
           <button
             type="button"
@@ -5186,6 +5210,7 @@ export function RoutineJournal({
             </div>
           )}
         </div>
+        ) : null}
 
         <div className="mt-4 hidden grid gap-3">
           {loadingEntries ? (
