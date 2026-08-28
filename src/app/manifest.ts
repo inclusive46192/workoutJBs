@@ -1,5 +1,8 @@
 import type { MetadataRoute } from "next";
 
+// Required so the manifest can be emitted as a file in static export builds.
+export const dynamic = "force-static";
+
 export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "Momentum Journal",
