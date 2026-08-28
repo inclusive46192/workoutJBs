@@ -2,7 +2,7 @@
   "buildCommand": "npm run build:offline",
   "outputDirectory": "out",
   "framework": null,
-  "cleanUrls": true,
+  "trailingSlash": true,
   "headers": [
     {
       "source": "/sw.js",
