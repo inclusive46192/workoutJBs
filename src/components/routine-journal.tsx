@@ -16,7 +16,7 @@ type RoutineJournalProps = {
 };
 
 type JournalTab = "cloud" | "lite";
-type PageViewTab = "training" | "dashboard" | "profile";
+type PageViewTab = "training" | "dashboard";
 
 type EntryState = {
   exercise: string;
@@ -413,6 +413,7 @@ export function RoutineJournal({
 
   const [activeTab, setActiveTab] = useState<JournalTab>(initialTab);
   const [pageViewTab, setPageViewTab] = useState<PageViewTab>("training");
+  const [showProfilePanel, setShowProfilePanel] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState(categories[0]?.name ?? "");
   const [selectedDate, setSelectedDate] = useState(getTodayDateKey());
   const [profile, setProfile] = useState<UserProfile>(() => {
@@ -537,6 +538,7 @@ export function RoutineJournal({
   >({});
   const [workoutBuilderName, setWorkoutBuilderName] = useState("");
   const [selectedWorkoutBuilderName, setSelectedWorkoutBuilderName] = useState("");
+  const [showBuilderPanel, setShowBuilderPanel] = useState(false);
   const [selectedBuilderMuscleGroup, setSelectedBuilderMuscleGroup] =
     useState<BuilderMuscleGroup>("Alle");
   const [showAdvancedBuilderFields, setShowAdvancedBuilderFields] = useState(false);
@@ -721,6 +723,7 @@ export function RoutineJournal({
         totalCompleted: 0,
         topExercises: [] as Array<{ name: string; count: number }>,
         weightTrend: [] as Array<{ key: string; value: number | null }>,
+        weightDailySeries: [] as Array<{ key: string; value: number }>,
         recent7Days: getLastNDays(7).map((key) => ({ key, count: 0 })),
         weekView: getWeekKeysMondayToSunday(selectedDate).map((key) => ({
           key,
@@ -813,12 +816,19 @@ export function RoutineJournal({
       const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
       return { key, value: Math.round(avg * 10) / 10 };
     });
+    const weightDailySeries = Array.from(weightByDay.entries())
+      .map(([key, values]) => ({
+        key,
+        value: Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 10) / 10,
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key));
 
     return {
       totalSessions,
       totalCompleted,
       topExercises,
       weightTrend,
+      weightDailySeries,
       recent7Days: recent7.map((key) => ({ key, count: counts.get(key) ?? 0 })),
       weekView: weekKeys.map((key) => ({
         key,
@@ -2558,6 +2568,43 @@ export function RoutineJournal({
     1,
     ...overviewStats.topExercises.map((exerciseItem) => exerciseItem.count),
   );
+  const latestWeight = overviewStats.weightDailySeries[overviewStats.weightDailySeries.length - 1]?.value ?? null;
+  const avgLast7Weight =
+    overviewStats.weightDailySeries.length === 0
+      ? null
+      : (() => {
+          const last7 = overviewStats.weightDailySeries.slice(-7).map((item) => item.value);
+          return Math.round((last7.reduce((sum, value) => sum + value, 0) / last7.length) * 10) / 10;
+        })();
+  const avgPrev7Weight =
+    overviewStats.weightDailySeries.length < 8
+      ? null
+      : (() => {
+          const prev7 = overviewStats.weightDailySeries.slice(-14, -7).map((item) => item.value);
+          if (prev7.length === 0) {
+            return null;
+          }
+          return Math.round((prev7.reduce((sum, value) => sum + value, 0) / prev7.length) * 10) / 10;
+        })();
+  const avgLast30Weight =
+    overviewStats.weightDailySeries.length === 0
+      ? null
+      : (() => {
+          const last30 = overviewStats.weightDailySeries.slice(-30).map((item) => item.value);
+          return Math.round((last30.reduce((sum, value) => sum + value, 0) / last30.length) * 10) / 10;
+        })();
+  const avgPrev30Weight =
+    overviewStats.weightDailySeries.length < 31
+      ? null
+      : (() => {
+          const prev30 = overviewStats.weightDailySeries.slice(-60, -30).map((item) => item.value);
+          if (prev30.length === 0) {
+            return null;
+          }
+          return Math.round((prev30.reduce((sum, value) => sum + value, 0) / prev30.length) * 10) / 10;
+        })();
+  const weekReduction = avgLast7Weight !== null && avgPrev7Weight !== null ? avgPrev7Weight - avgLast7Weight : null;
+  const monthReduction = avgLast30Weight !== null && avgPrev30Weight !== null ? avgPrev30Weight - avgLast30Weight : null;
 
   return (
     <section className="flex flex-1 flex-col gap-4 pb-32 sm:pb-28">
@@ -2643,6 +2690,181 @@ export function RoutineJournal({
         </p>
       ) : null}
 
+      <div className="relative rounded-xl border border-slate-300 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex-1">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-300">
+              Account
+            </p>
+            {activeTab === "cloud" ? (
+              !supabaseReady ? (
+                <p className="mt-1 text-sm font-medium text-rose-700 dark:text-rose-300">
+                  Supabase noch nicht konfiguriert (.env.local).
+                </p>
+              ) : session ? (
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
+                    Eingeloggt: {session.user.email}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={signOut}
+                    className="touch-manipulation rounded-lg border border-emerald-700 px-3 py-1.5 text-xs font-semibold text-emerald-800 dark:text-emerald-300"
+                  >
+                    Abmelden
+                  </button>
+                </div>
+              ) : (
+                <div className="mt-1 grid gap-2 sm:grid-cols-[1fr_auto]">
+                  <input
+                    type="email"
+                    value={authEmail}
+                    onChange={(event) => setAuthEmail(event.target.value)}
+                    placeholder="deine@email.de"
+                    className="rounded-lg border border-slate-400 bg-white px-3 py-2.5 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                  <button
+                    type="button"
+                    disabled={authBusy || !authEmail}
+                    onClick={sendMagicLink}
+                    className="touch-manipulation rounded-lg bg-teal-700 px-3 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Magic Link senden
+                  </button>
+                </div>
+              )
+            ) : (
+              <p className="mt-1 text-sm font-medium text-slate-600 dark:text-slate-300">
+                Offline Modus aktiv (lokale Speicherung).
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowProfilePanel((current) => !current)}
+            className="touch-manipulation rounded-full border border-slate-300 bg-slate-100 p-2 text-lg dark:border-slate-600 dark:bg-slate-800"
+            aria-label="Profil Einstellungen öffnen"
+          >
+            👤
+          </button>
+        </div>
+
+        {showProfilePanel ? (
+          <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm font-bold uppercase tracking-[0.14em] text-slate-700 dark:text-slate-200">
+                Profil & Einstellungen
+              </p>
+              {activeTab === "cloud" ? (
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void loadProfileFromCloud(true);
+                    }}
+                    className="touch-manipulation rounded-lg border border-teal-600 px-3 py-1.5 text-xs font-semibold text-teal-800 dark:text-teal-300"
+                  >
+                    Cloud laden
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void saveProfileToCloud(true);
+                    }}
+                    className="touch-manipulation rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-semibold text-white"
+                  >
+                    Cloud speichern
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="flex flex-col gap-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+                Name
+                <input
+                  value={profile.displayName}
+                  onChange={(event) =>
+                    setProfile((current) => ({ ...current, displayName: event.target.value }))
+                  }
+                  placeholder="Dein Name"
+                  className="rounded-lg border border-slate-400 px-3 py-2.5 text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+                Reminder Uhrzeit
+                <input
+                  type="time"
+                  value={profile.reminderTime}
+                  onChange={(event) =>
+                    setProfile((current) => ({ ...current, reminderTime: event.target.value }))
+                  }
+                  className="rounded-lg border border-slate-400 px-3 py-2.5 text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm font-medium text-slate-900 dark:text-slate-100 sm:col-span-2">
+                Ziel
+                <textarea
+                  rows={3}
+                  value={profile.goal}
+                  onChange={(event) =>
+                    setProfile((current) => ({ ...current, goal: event.target.value }))
+                  }
+                  placeholder="z. B. 4x Training/Woche + konstante Morning Routine"
+                  className="rounded-lg border border-slate-400 px-3 py-2.5 text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                />
+              </label>
+            </div>
+
+            <div className="mt-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
+                Gewichtseinheit
+              </p>
+              <div className="mt-2 flex gap-2">
+                {(["kg", "lbs"] as const).map((unit) => (
+                  <button
+                    key={`unit-${unit}`}
+                    type="button"
+                    onClick={() => setProfile((current) => ({ ...current, weightUnit: unit }))}
+                    className={`touch-manipulation rounded-lg px-3 py-2 text-sm font-semibold ${
+                      profile.weightUnit === unit
+                        ? "bg-teal-700 text-white"
+                        : "border border-slate-300 bg-white text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+                    }`}
+                  >
+                    {unit.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
+                Bevorzugte Kategorien
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {categories.map((category) => {
+                  const selected = profile.preferredCategories.includes(category.name);
+                  return (
+                    <button
+                      key={`profile-category-${category.name}`}
+                      type="button"
+                      onClick={() => togglePreferredCategory(category.name)}
+                      className={`touch-manipulation rounded-full px-3 py-1.5 text-xs font-semibold ${
+                        selected
+                          ? "bg-emerald-600 text-white"
+                          : "border border-slate-300 bg-white text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+                      }`}
+                    >
+                      {category.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+
       <div className="flex gap-2 rounded-xl bg-slate-200 p-1.5 dark:bg-slate-800">
         <button
           type="button"
@@ -2666,17 +2888,6 @@ export function RoutineJournal({
         >
           Activity Tracker
         </button>
-        <button
-          type="button"
-          onClick={() => setPageViewTab("profile")}
-          className={`touch-manipulation flex-1 rounded-lg px-3 py-2.5 text-[15px] font-semibold ${
-            pageViewTab === "profile"
-              ? "bg-white text-teal-800 shadow dark:bg-slate-900 dark:text-teal-300"
-              : "text-slate-800 dark:text-slate-200"
-          }`}
-        >
-          Profil
-        </button>
       </div>
 
       <div className="w-full max-w-full overflow-x-hidden rounded-xl border border-slate-300 bg-white p-3 shadow-sm dark:border-slate-700 dark:bg-slate-900 sm:p-4">
@@ -2690,7 +2901,7 @@ export function RoutineJournal({
               {overviewStats.totalSessions} Sessions
             </span>
           </div>
-          <div className="mt-3 grid gap-3 sm:grid-cols-4">
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <div className="rounded-lg bg-emerald-50 p-3">
               <p className="text-xs uppercase tracking-[0.12em] text-emerald-700">Absolviert</p>
               <p className="mt-2 text-2xl font-black text-emerald-900">{overviewStats.totalSessions}</p>
@@ -2709,6 +2920,31 @@ export function RoutineJournal({
               <p className="text-xs uppercase tracking-[0.12em] text-amber-700">Streak</p>
               <p className="mt-2 text-2xl font-black text-amber-900">
                 {overviewStats.recent7Days.filter((day) => day.count > 0).length}
+              </p>
+            </div>
+            <div className="rounded-lg bg-sky-50 p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-sky-700">Aktuelles Gewicht</p>
+              <p className="mt-2 text-2xl font-black text-sky-900">
+                {latestWeight !== null ? `${latestWeight} ${weightUnitLabel}` : "—"}
+              </p>
+            </div>
+            <div className="rounded-lg bg-indigo-50 p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-indigo-700">Ø Woche / Monat</p>
+              <p className="mt-2 text-sm font-black text-indigo-900">
+                {avgLast7Weight !== null ? `${avgLast7Weight} ${weightUnitLabel}` : "—"} /{" "}
+                {avgLast30Weight !== null ? `${avgLast30Weight} ${weightUnitLabel}` : "—"}
+              </p>
+            </div>
+            <div className="rounded-lg bg-rose-50 p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-rose-700">Reduktion Vorwoche</p>
+              <p className="mt-2 text-sm font-black text-rose-900">
+                {weekReduction !== null ? `${weekReduction > 0 ? "-" : "+"}${Math.abs(weekReduction).toFixed(1)} ${weightUnitLabel}` : "—"}
+              </p>
+            </div>
+            <div className="rounded-lg bg-fuchsia-50 p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-fuchsia-700">Reduktion Vormonat</p>
+              <p className="mt-2 text-sm font-black text-fuchsia-900">
+                {monthReduction !== null ? `${monthReduction > 0 ? "-" : "+"}${Math.abs(monthReduction).toFixed(1)} ${weightUnitLabel}` : "—"}
               </p>
             </div>
           </div>
@@ -2870,121 +3106,6 @@ export function RoutineJournal({
 
         ) : null}
 
-        {pageViewTab === "profile" ? (
-          <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-sm font-bold uppercase tracking-[0.14em] text-slate-700 dark:text-slate-200">
-                Profil & Einstellungen
-              </p>
-              {activeTab === "cloud" ? (
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void loadProfileFromCloud(true);
-                    }}
-                    className="touch-manipulation rounded-lg border border-teal-600 px-3 py-1.5 text-xs font-semibold text-teal-800 dark:text-teal-300"
-                  >
-                    Cloud laden
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void saveProfileToCloud(true);
-                    }}
-                    className="touch-manipulation rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-semibold text-white"
-                  >
-                    Cloud speichern
-                  </button>
-                </div>
-              ) : null}
-            </div>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              <label className="flex flex-col gap-1 text-sm font-medium text-slate-900 dark:text-slate-100">
-                Name
-                <input
-                  value={profile.displayName}
-                  onChange={(event) =>
-                    setProfile((current) => ({ ...current, displayName: event.target.value }))
-                  }
-                  placeholder="Dein Name"
-                  className="rounded-lg border border-slate-400 px-3 py-2.5 text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-sm font-medium text-slate-900 dark:text-slate-100">
-                Reminder Uhrzeit
-                <input
-                  type="time"
-                  value={profile.reminderTime}
-                  onChange={(event) =>
-                    setProfile((current) => ({ ...current, reminderTime: event.target.value }))
-                  }
-                  className="rounded-lg border border-slate-400 px-3 py-2.5 text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-sm font-medium text-slate-900 dark:text-slate-100 sm:col-span-2">
-                Ziel
-                <textarea
-                  rows={3}
-                  value={profile.goal}
-                  onChange={(event) =>
-                    setProfile((current) => ({ ...current, goal: event.target.value }))
-                  }
-                  placeholder="z. B. 4x Training/Woche + konstante Morning Routine"
-                  className="rounded-lg border border-slate-400 px-3 py-2.5 text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
-                />
-              </label>
-            </div>
-
-            <div className="mt-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
-                Gewichtseinheit
-              </p>
-              <div className="mt-2 flex gap-2">
-                {(["kg", "lbs"] as const).map((unit) => (
-                  <button
-                    key={`unit-${unit}`}
-                    type="button"
-                    onClick={() => setProfile((current) => ({ ...current, weightUnit: unit }))}
-                    className={`touch-manipulation rounded-lg px-3 py-2 text-sm font-semibold ${
-                      profile.weightUnit === unit
-                        ? "bg-teal-700 text-white"
-                        : "border border-slate-300 bg-white text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
-                    }`}
-                  >
-                    {unit.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="mt-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
-                Bevorzugte Kategorien
-              </p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {categories.map((category) => {
-                  const selected = profile.preferredCategories.includes(category.name);
-                  return (
-                    <button
-                      key={`profile-category-${category.name}`}
-                      type="button"
-                      onClick={() => togglePreferredCategory(category.name)}
-                      className={`touch-manipulation rounded-full px-3 py-1.5 text-xs font-semibold ${
-                        selected
-                          ? "bg-emerald-600 text-white"
-                          : "border border-slate-300 bg-white text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
-                      }`}
-                    >
-                      {category.name}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        ) : null}
-
         {pageViewTab === "training" ? (
         <>
         <div className="grid gap-3 sm:grid-cols-3">
@@ -3056,11 +3177,20 @@ export function RoutineJournal({
 
         <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50 p-3 dark:border-teal-900 dark:bg-teal-950/30">
         <p className="text-sm font-semibold text-teal-900 dark:text-teal-200">
-            Workout Builder & Aktives Setup ({selectedCategory})
+          Routine Builder ({selectedCategory})
           </p>
         <p className="mt-1 text-xs text-teal-800 dark:text-teal-300">
-            Hier baust du dein Workout direkt und nutzt es sofort darunter im Trainingsflow.
+          Stelle hier deine Routine zusammen. Das aktive Workout läuft separat im Bereich darunter.
           </p>
+          <button
+            type="button"
+            onClick={() => setShowBuilderPanel((current) => !current)}
+            className="mt-2 touch-manipulation rounded-lg border border-teal-300 bg-white px-3 py-1.5 text-xs font-semibold text-teal-800 dark:border-teal-800 dark:bg-slate-900 dark:text-teal-300"
+          >
+            {showBuilderPanel ? "Builder ausblenden" : "Builder anzeigen"}
+          </button>
+          {showBuilderPanel ? (
+            <>
         <div className="mt-2 rounded-lg border border-teal-200 bg-white p-2 dark:border-teal-900 dark:bg-slate-900">
           <p className="text-xs font-semibold uppercase tracking-wide text-teal-800 dark:text-teal-300">
               Quick Start
@@ -3382,6 +3512,8 @@ export function RoutineJournal({
               );
             })}
           </div>
+        </>
+        ) : null}
         </div>
 
         {!isMorningRoutine && !isTabata ? (
@@ -3947,53 +4079,6 @@ export function RoutineJournal({
             )}
           </div>
         ) : null}
-
-        {activeTab === "cloud" ? (
-          <div className="mt-4 rounded-lg border border-teal-300 bg-teal-100 p-3">
-            {!supabaseReady ? (
-              <p className="text-sm font-medium text-teal-950">
-                Supabase ist noch nicht konfiguriert. Trage zuerst die Variablen in
-                <code className="mx-1 rounded bg-white px-1 py-0.5">.env.local</code> ein.
-              </p>
-            ) : session ? (
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-medium text-teal-950">
-                  Angemeldet als <strong>{session.user.email}</strong>
-                </p>
-                <button
-                  type="button"
-                  onClick={signOut}
-                  className="rounded-lg border border-teal-700 px-3 py-1 text-sm font-semibold text-teal-800"
-                >
-                  Abmelden
-                </button>
-              </div>
-            ) : (
-              <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-                <input
-                  type="email"
-                  value={authEmail}
-                  onChange={(event) => setAuthEmail(event.target.value)}
-                  placeholder="deine@email.de"
-                  className="rounded-lg border border-teal-400 bg-white px-3 py-2 text-sm text-slate-900"
-                />
-                <button
-                  type="button"
-                  disabled={authBusy || !authEmail}
-                  onClick={sendMagicLink}
-                  className="rounded-lg bg-teal-700 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Magic Link senden
-                </button>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="mt-4 rounded-lg border border-indigo-300 bg-indigo-100 p-3 text-sm font-medium text-indigo-950">
-            Dieser Tab bleibt komplett lokal im Browser gespeichert und funktioniert ohne
-            Login.
-          </div>
-        )}
 
         <div className="mt-4 rounded-xl border border-slate-300 bg-slate-50 p-3">
           <div className="flex items-center justify-between gap-2">
