@@ -6,6 +6,18 @@ import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { exerciseMuscleGroupMap, type JournalCategory } from "@/lib/exercises";
 import { getSupabaseClient } from "@/lib/supabase";
+import { useWakeLock } from "@/hooks/use-wake-lock";
+import {
+  cancelScheduledCues,
+  playHapticClick,
+  playRestStart,
+  playSessionComplete,
+  playWorkStart,
+  schedulePhaseCues,
+  setSignalsEnabled,
+  unlockAudio,
+  type SignalProfile,
+} from "@/lib/workout-audio";
 
 type RoutineJournalProps = {
   initialTab: "cloud" | "lite";
@@ -115,6 +127,16 @@ type UserProfile = {
 
 type DashboardGraphKey = "weight" | "duration" | "volume" | "categoryMix" | "consistency";
 
+type IntervalPhase = "idle" | "prep" | "work" | "rest" | "complete";
+
+type IntervalSettings = {
+  prepSeconds: number;
+  restSeconds: number;
+  totalRounds: number;
+  defaultWorkSeconds: number;
+  profile: SignalProfile;
+};
+
 type BuilderMuscleGroup =
   | "Alle"
   | "Brust"
@@ -144,6 +166,9 @@ const routineComposerStorageKey = "momentum-builder:routine-composer:v1";
 const lastQuickLoadStorageKey = "momentum-quickload:last-by-category:v1";
 const profileStorageKey = "momentum-profile:v1";
 const dashboardGraphConfigStorageKey = "momentum-dashboard:graph-config:v1";
+const intervalSettingsStorageKey = "momentum-interval:settings:v1";
+const signalPrefsStorageKey = "momentum-signals:prefs:v1";
+const lastSetValuesStorageKey = "momentum-sets:last-values:v1";
 const bodyWeightStorageKeyPrefix = "momentum-bodyweight:";
 const defaultDashboardGraphConfig: Record<DashboardGraphKey, boolean> = {
   weight: true,
@@ -600,9 +625,9 @@ export function RoutineJournal({
     startedAtMs: number;
   } | null>(null);
   const [morningFlowActive, setMorningFlowActive] = useState(false);
-  const [showFlowCompletionPrompt, setShowFlowCompletionPrompt] = useState(false);
   const [minuteAlertedExercise, setMinuteAlertedExercise] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [hasMounted, setHasMounted] = useState(false);
   const [customExercisesByCategory, setCustomExercisesByCategory] = useState<
     Record<string, string[]>
   >(() => {
@@ -677,6 +702,24 @@ export function RoutineJournal({
   const [statusText, setStatusText] = useState("");
   const [errorText, setErrorText] = useState("");
 
+  const [intervalPhase, setIntervalPhase] = useState<IntervalPhase>("idle");
+  const [phaseEndsAtMs, setPhaseEndsAtMs] = useState<number | null>(null);
+  const [phaseExercise, setPhaseExercise] = useState<string | null>(null);
+  const [phaseRound, setPhaseRound] = useState(1);
+  const [phaseTotalSeconds, setPhaseTotalSeconds] = useState(0);
+  const [showFocusOverlay, setShowFocusOverlay] = useState(true);
+  const [tabataRounds, setTabataRounds] = useState(8);
+  const [hitWorkSeconds, setHitWorkSeconds] = useState(40);
+  const [hitRestSeconds, setHitRestSeconds] = useState(20);
+  const [prepSecondsSetting, setPrepSecondsSetting] = useState(10);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [reducedMotion, setReducedMotion] = useState(false);
+  const [lastSetValues, setLastSetValues] = useState<Record<string, { reps: string; weightKg: string }>>({});
+  const [restTimerEndsAtMs, setRestTimerEndsAtMs] = useState<number | null>(null);
+  const [restTimerExercise, setRestTimerExercise] = useState<string | null>(null);
+  const [restTimerSeconds, setRestTimerSeconds] = useState(90);
+  const cancelCuesRef = useRef<() => void>(() => {});
+
   const [session, setSession] = useState<Session | null>(null);
   const [authEmail, setAuthEmail] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
@@ -697,8 +740,6 @@ export function RoutineJournal({
   const [favoritesByCategory, setFavoritesByCategory] = useState<Record<string, CategoryFavorite[]>>(
     {},
   );
-  const [newFavoriteName, setNewFavoriteName] = useState("");
-  const [selectedFavoriteName, setSelectedFavoriteName] = useState("");
   const [bodybuildingPlans, setBodybuildingPlans] = useState<BodybuildingPlan[]>([]);
   const [newBodybuildingPlanName, setNewBodybuildingPlanName] = useState("");
   const [selectedBodybuildingPlanName, setSelectedBodybuildingPlanName] = useState("");
@@ -789,11 +830,33 @@ export function RoutineJournal({
   }, [categories]);
 
   useEffect(() => {
+    setHasMounted(true);
+  }, []);
+
+  useEffect(() => {
+    const isTicking =
+      intervalPhase === "prep" || intervalPhase === "work" || intervalPhase === "rest";
     const tick = window.setInterval(() => {
       setNowMs(Date.now());
-    }, 1000);
+    }, isTicking ? 200 : 1000);
     return () => {
       window.clearInterval(tick);
+    };
+  }, [intervalPhase]);
+
+  // Re-sync immediately when returning from background: iOS throttles timers,
+  // so the wall clock is the single source of truth.
+  useEffect(() => {
+    const resync = () => {
+      if (document.visibilityState === "visible") {
+        setNowMs(Date.now());
+      }
+    };
+    document.addEventListener("visibilitychange", resync);
+    window.addEventListener("focus", resync);
+    return () => {
+      document.removeEventListener("visibilitychange", resync);
+      window.removeEventListener("focus", resync);
     };
   }, []);
 
@@ -915,16 +978,101 @@ export function RoutineJournal({
   }, [dashboardGraphConfig]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const rawIntervals = localStorage.getItem(intervalSettingsStorageKey);
+    if (rawIntervals) {
+      try {
+        const parsed = JSON.parse(rawIntervals) as {
+          tabataRounds?: number;
+          hitWorkSeconds?: number;
+          hitRestSeconds?: number;
+          prepSeconds?: number;
+        };
+        if (parsed.tabataRounds) setTabataRounds(parsed.tabataRounds);
+        if (parsed.hitWorkSeconds) setHitWorkSeconds(parsed.hitWorkSeconds);
+        if (parsed.hitRestSeconds !== undefined) setHitRestSeconds(parsed.hitRestSeconds);
+        if (parsed.prepSeconds !== undefined) setPrepSecondsSetting(parsed.prepSeconds);
+      } catch {
+        // ignore malformed settings
+      }
+    }
+
+    const rawSignals = localStorage.getItem(signalPrefsStorageKey);
+    if (rawSignals) {
+      try {
+        const parsed = JSON.parse(rawSignals) as { sound?: boolean; halfway?: boolean; rest?: number };
+        if (parsed.sound !== undefined) setSoundEnabled(parsed.sound);
+        if (parsed.halfway !== undefined) setHalfwayAlertEnabled(parsed.halfway);
+        if (parsed.rest !== undefined) setRestTimerSeconds(parsed.rest);
+      } catch {
+        // ignore malformed settings
+      }
+    }
+
+    const rawLastSets = localStorage.getItem(lastSetValuesStorageKey);
+    if (rawLastSets) {
+      try {
+        setLastSetValues(JSON.parse(rawLastSets) as Record<string, { reps: string; weightKg: string }>);
+      } catch {
+        // ignore malformed history
+      }
+    }
+
+    const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setReducedMotion(motionQuery.matches);
+    const onMotionChange = (event: MediaQueryListEvent) => setReducedMotion(event.matches);
+    motionQuery.addEventListener("change", onMotionChange);
+    return () => motionQuery.removeEventListener("change", onMotionChange);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    localStorage.setItem(
+      intervalSettingsStorageKey,
+      JSON.stringify({
+        tabataRounds,
+        hitWorkSeconds,
+        hitRestSeconds,
+        prepSeconds: prepSecondsSetting,
+      }),
+    );
+  }, [hitRestSeconds, hitWorkSeconds, prepSecondsSetting, tabataRounds]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    localStorage.setItem(
+      signalPrefsStorageKey,
+      JSON.stringify({ sound: soundEnabled, halfway: halfwayAlertEnabled, rest: restTimerSeconds }),
+    );
+    setSignalsEnabled(soundEnabled);
+  }, [halfwayAlertEnabled, restTimerSeconds, soundEnabled]);
+
+  // Rest timer between strength sets: fires once when it reaches zero.
+  useEffect(() => {
+    if (!restTimerEndsAtMs || nowMs < restTimerEndsAtMs) {
+      return;
+    }
+    setRestTimerEndsAtMs(null);
+    playWorkStart("intense");
+    setStatusText(
+      restTimerExercise ? `Pause vorbei - weiter mit ${restTimerExercise}.` : "Pause vorbei.",
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nowMs, restTimerEndsAtMs]);
+
+  useEffect(() => {
     if (activeTab !== "cloud" || !supabase || !session?.user.id) {
       return;
     }
     void saveProfileToCloud(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, profile, session?.user.id, supabase]);
-
-  useEffect(() => {
-    setShowFlowCompletionPrompt(false);
-  }, [selectedCategory, selectedDate]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1163,6 +1311,9 @@ export function RoutineJournal({
         done: dayDone.get(key) ?? false,
       })),
     };
+    // bodyWeightKg is included so the weight chart refreshes right after the
+    // value is persisted to localStorage, which this memo reads from.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bodyWeightKg, dashboardRange, selectedDate]);
 
   const toggleDashboardGraph = (key: DashboardGraphKey) => {
@@ -1297,8 +1448,58 @@ export function RoutineJournal({
   const isHitWorkout = selectedCategory === "HIT Workouts";
   const isBodybuilding = selectedCategory === "Bodybuilding";
   const isFlowCategory = isMorningRoutine || isTabata || isYoga;
+  const isIntervalCategory = isFlowCategory || isHitWorkout;
   const flowLabel = isTabata ? "Tabata" : isYoga ? "Yoga" : "Morning";
   const defaultFlowSeconds = isTabata ? 20 : isYoga ? 45 : 60;
+
+  const intervalSettings = useMemo<IntervalSettings>(() => {
+    if (isTabata) {
+      return {
+        prepSeconds: prepSecondsSetting,
+        restSeconds: 10,
+        totalRounds: tabataRounds,
+        defaultWorkSeconds: 20,
+        profile: "intense",
+      };
+    }
+    if (isHitWorkout) {
+      return {
+        prepSeconds: prepSecondsSetting,
+        restSeconds: hitRestSeconds,
+        totalRounds: hitTargetRounds,
+        defaultWorkSeconds: hitWorkSeconds,
+        profile: "intense",
+      };
+    }
+    if (isYoga) {
+      return {
+        prepSeconds: Math.min(5, prepSecondsSetting),
+        restSeconds: 0,
+        totalRounds: 1,
+        defaultWorkSeconds: 45,
+        profile: "calm",
+      };
+    }
+    return {
+      prepSeconds: Math.min(5, prepSecondsSetting),
+      restSeconds: 0,
+      totalRounds: 1,
+      defaultWorkSeconds: 60,
+      profile: "calm",
+    };
+  }, [
+    hitRestSeconds,
+    hitTargetRounds,
+    hitWorkSeconds,
+    isHitWorkout,
+    isTabata,
+    isYoga,
+    prepSecondsSetting,
+    tabataRounds,
+  ]);
+
+  const intervalRunning = intervalPhase === "prep" || intervalPhase === "work" || intervalPhase === "rest";
+  useWakeLock(intervalRunning);
   const filteredBuilderEntries = useMemo(() => {
     if (selectedBuilderMuscleGroup === "Alle") {
       return builderEntries;
@@ -1621,6 +1822,27 @@ export function RoutineJournal({
       return false;
     }
     setErrorText("");
+
+    if (done) {
+      const completedLog = entries.find((entry) => entry.exercise === exercise)?.setLogs[setIndex];
+      if (completedLog) {
+        const nextValues = {
+          ...lastSetValues,
+          [exercise]: { reps: completedLog.reps, weightKg: completedLog.weightKg },
+        };
+        setLastSetValues(nextValues);
+        if (typeof window !== "undefined") {
+          localStorage.setItem(lastSetValuesStorageKey, JSON.stringify(nextValues));
+        }
+      }
+      // Hevy/Strong pattern: rest countdown starts automatically after a set.
+      if (restTimerSeconds > 0) {
+        setRestTimerExercise(exercise);
+        setRestTimerEndsAtMs(Date.now() + restTimerSeconds * 1000);
+        playHapticClick();
+      }
+    }
+
     return true;
   };
 
@@ -1685,9 +1907,6 @@ export function RoutineJournal({
       setStatusText(
         `${flowLabel} Flow abgeschlossen - stark durchgezogen!`,
       );
-      if (isMorningRoutine) {
-        setShowFlowCompletionPrompt(true);
-      }
       return;
     }
 
@@ -1737,40 +1956,228 @@ export function RoutineJournal({
     advanceMorningFlow(exercise);
   };
 
-  const startMorningFlow = () => {
-    if (!isFlowCategory || activeExercises.length === 0) {
-      setErrorText("Flow ist nur in Morning Routine, Yoga oder Tabata verfügbar.");
+  const getWorkSecondsFor = (exercise: string) =>
+    getExerciseTargetSeconds(exerciseCustomSeconds, exercise, intervalSettings.defaultWorkSeconds);
+
+  const resolveNextIntervalStep = (
+    currentExercise: string | null,
+    round: number,
+  ): { exercise: string; round: number } | null => {
+    if (activeExercises.length === 0) {
+      return null;
+    }
+    if (!currentExercise) {
+      return { exercise: activeExercises[0], round };
+    }
+    const currentIndex = activeExercises.indexOf(currentExercise);
+    const nextExercise = activeExercises[currentIndex + 1];
+    if (nextExercise) {
+      return { exercise: nextExercise, round };
+    }
+    if (round < intervalSettings.totalRounds) {
+      return { exercise: activeExercises[0], round: round + 1 };
+    }
+    return null;
+  };
+
+  const resetRoundCompletions = () => {
+    const visibleNames = new Set(activeExercises);
+    setEntries((current) =>
+      current.map((entry) =>
+        visibleNames.has(entry.exercise)
+          ? {
+              ...entry,
+              completed: false,
+              completedSets: 0,
+              setLogs: entry.setLogs.map((setLog) => ({ ...setLog, done: false })),
+            }
+          : entry,
+      ),
+    );
+  };
+
+  const beginWorkPhase = (exercise: string, round: number) => {
+    const seconds = getWorkSecondsFor(exercise);
+    cancelCuesRef.current();
+    setPhaseExercise(exercise);
+    setPhaseRound(round);
+    setPhaseTotalSeconds(seconds);
+    setIntervalPhase("work");
+    setPhaseEndsAtMs(Date.now() + seconds * 1000);
+    startExerciseTimer(exercise);
+    playWorkStart(intervalSettings.profile);
+    cancelCuesRef.current = schedulePhaseCues({
+      durationSeconds: seconds,
+      profile: intervalSettings.profile,
+      halfway: halfwayAlertEnabled,
+    });
+    setStatusText(`${exercise} läuft.`);
+    setErrorText("");
+  };
+
+  const beginRestPhase = (upcomingExercise: string, round: number) => {
+    const seconds = intervalSettings.restSeconds;
+    cancelCuesRef.current();
+    setPhaseExercise(upcomingExercise);
+    setPhaseRound(round);
+    setPhaseTotalSeconds(seconds);
+    setIntervalPhase("rest");
+    setPhaseEndsAtMs(Date.now() + seconds * 1000);
+    playRestStart(intervalSettings.profile);
+    cancelCuesRef.current = schedulePhaseCues({
+      durationSeconds: seconds,
+      profile: intervalSettings.profile,
+      halfway: false,
+    });
+    setStatusText(`Pause - als Nächstes: ${upcomingExercise}`);
+  };
+
+  const completeIntervalSession = () => {
+    cancelCuesRef.current();
+    cancelScheduledCues();
+    if (activeExerciseTimer) {
+      pauseExerciseTimer(activeExerciseTimer.exercise);
+    }
+    setIntervalPhase("complete");
+    setPhaseEndsAtMs(null);
+    setPhaseTotalSeconds(0);
+    setMorningFlowActive(false);
+    if (overallStartedAtMs) {
+      const delta = Math.max(0, Math.floor((Date.now() - overallStartedAtMs) / 1000));
+      setOverallBaseSeconds((current) => current + delta);
+      setOverallStartedAtMs(null);
+    }
+    playSessionComplete(intervalSettings.profile);
+    setStatusText(`${isHitWorkout ? "HIT" : flowLabel} abgeschlossen - stark durchgezogen!`);
+    setErrorText("");
+  };
+
+  const handleIntervalPhaseEnd = () => {
+    if (intervalPhase === "prep") {
+      const target = phaseExercise ?? activeExercises[0];
+      if (!target) {
+        completeIntervalSession();
+        return;
+      }
+      beginWorkPhase(target, phaseRound);
       return;
     }
 
-    const firstIncomplete = activeExercises.find(
-      (ex) => !visibleEntries.find((e) => e.exercise === ex)?.completed,
-    );
-    const firstExercise = firstIncomplete ?? activeExercises[0];
+    if (intervalPhase === "work") {
+      const current = phaseExercise;
+      if (current) {
+        handleEntryChange(current, { completed: true });
+        pauseExerciseTimer(current);
+      }
+      const nextStep = resolveNextIntervalStep(current, phaseRound);
+      if (!nextStep) {
+        completeIntervalSession();
+        return;
+      }
+      if (nextStep.round !== phaseRound) {
+        resetRoundCompletions();
+        setHitCurrentRound(nextStep.round);
+      }
+      if (intervalSettings.restSeconds > 0) {
+        beginRestPhase(nextStep.exercise, nextStep.round);
+      } else {
+        beginWorkPhase(nextStep.exercise, nextStep.round);
+      }
+      return;
+    }
 
-    setShowFlowCompletionPrompt(false);
-    setMorningFlowActive(true);
-    setMinuteAlertedExercise(null);
-    setActiveExerciseTimer({ exercise: firstExercise, startedAtMs: Date.now() });
-    setStatusText(
-      `${flowLabel} Flow gestartet mit: ${firstExercise}`,
-    );
-    setErrorText("");
-
-    if (!overallStartedAtMs) {
-      setOverallStartedAtMs(Date.now());
+    if (intervalPhase === "rest") {
+      const target = phaseExercise;
+      if (!target) {
+        completeIntervalSession();
+        return;
+      }
+      beginWorkPhase(target, phaseRound);
     }
   };
 
-  const submitFlowCompletion = () => {
-    const score = Number.parseInt(reflection.flowScore || "", 10);
-    if (Number.isNaN(score) || score < 0 || score > 10) {
-      setErrorText("Bitte einen Wert von 0 bis 10 für den Morning-Check eintragen.");
+  const startIntervalSession = async () => {
+    if (activeExercises.length === 0) {
+      setErrorText("Keine aktiven Übungen - bitte im Builder eine Routine laden.");
       return;
     }
-    setShowFlowCompletionPrompt(false);
-    setStatusText("Morning Check-in gespeichert.");
-    setErrorText("");
+
+    const unlocked = await unlockAudio();
+    if (!unlocked && soundEnabled) {
+      setStatusText("Ton konnte nicht aktiviert werden - visuelle Signale laufen weiter.");
+    }
+
+    const firstExercise =
+      visibleEntries.find((entry) => !entry.completed)?.exercise ?? activeExercises[0];
+
+    setMorningFlowActive(true);
+    setHitCurrentRound(1);
+    setPhaseRound(1);
+    setPhaseExercise(firstExercise);
+    setShowFocusOverlay(true);
+    if (!overallStartedAtMs) {
+      setOverallStartedAtMs(Date.now());
+    }
+
+    if (intervalSettings.prepSeconds > 0) {
+      cancelCuesRef.current();
+      setIntervalPhase("prep");
+      setPhaseTotalSeconds(intervalSettings.prepSeconds);
+      setPhaseEndsAtMs(Date.now() + intervalSettings.prepSeconds * 1000);
+      playHapticClick();
+      cancelCuesRef.current = schedulePhaseCues({
+        durationSeconds: intervalSettings.prepSeconds,
+        profile: intervalSettings.profile,
+        halfway: false,
+      });
+      setStatusText(`Gleich geht's los: ${firstExercise}`);
+      setErrorText("");
+      return;
+    }
+
+    beginWorkPhase(firstExercise, 1);
+  };
+
+  const pauseIntervalSession = () => {
+    cancelCuesRef.current();
+    cancelScheduledCues();
+    if (activeExerciseTimer) {
+      pauseExerciseTimer(activeExerciseTimer.exercise);
+    }
+    if (overallStartedAtMs) {
+      const delta = Math.max(0, Math.floor((Date.now() - overallStartedAtMs) / 1000));
+      setOverallBaseSeconds((current) => current + delta);
+      setOverallStartedAtMs(null);
+    }
+    setIntervalPhase("idle");
+    setPhaseEndsAtMs(null);
+    setMorningFlowActive(false);
+    setStatusText("Session pausiert.");
+  };
+
+  const skipIntervalPhase = () => {
+    if (!intervalRunning) {
+      return;
+    }
+    playHapticClick();
+    handleIntervalPhaseEnd();
+  };
+
+  const exitIntervalSession = () => {
+    cancelCuesRef.current();
+    cancelScheduledCues();
+    if (activeExerciseTimer) {
+      pauseExerciseTimer(activeExerciseTimer.exercise);
+    }
+    if (overallStartedAtMs) {
+      const delta = Math.max(0, Math.floor((Date.now() - overallStartedAtMs) / 1000));
+      setOverallBaseSeconds((current) => current + delta);
+      setOverallStartedAtMs(null);
+    }
+    setIntervalPhase("idle");
+    setPhaseEndsAtMs(null);
+    setPhaseExercise(null);
+    setMorningFlowActive(false);
   };
 
   const toggleExerciseVisibility = (exercise: string) => {
@@ -2233,28 +2640,7 @@ export function RoutineJournal({
       return;
     }
 
-    if (hitCurrentRound >= hitTargetRounds) {
-      setStatusText(`HIT abgeschlossen: ${hitTargetRounds}/${hitTargetRounds} Runden geschafft.`);
-      setErrorText("");
-      return;
-    }
-
-    const visibleNames = new Set(visibleEntries.map((entry) => entry.exercise));
-    setEntries((current) =>
-      current.map((entry) =>
-        visibleNames.has(entry.exercise)
-          ? {
-              ...entry,
-              completed: false,
-              completedSets: 0,
-              setLogs: entry.setLogs.map((setLog) => ({ ...setLog, done: false })),
-            }
-          : entry,
-      ),
-    );
-    setHitCurrentRound((current) => current + 1);
-    setStatusText(`Runde ${hitCurrentRound} erledigt. Starte Runde ${hitCurrentRound + 1}.`);
-    setErrorText("");
+    advanceHitRound();
   };
 
   const saveHitWorkoutSet = () => {
@@ -2357,85 +2743,6 @@ export function RoutineJournal({
     setSelectedHitSetName(setToLoad.name);
     rememberQuickLoad("hit-set", setToLoad.name);
     setStatusText(`HIT-Set "${setToLoad.name}" geladen.`);
-    setErrorText("");
-  };
-
-  const saveCategoryFavorite = () => {
-    const trimmed = newFavoriteName.trim();
-    if (!trimmed) {
-      setErrorText("Bitte einen Namen für den Favoriten eingeben.");
-      return;
-    }
-
-    const favorite: CategoryFavorite = {
-      name: trimmed,
-      category: selectedCategory,
-      entries: visibleEntries,
-      reflection,
-      exerciseCustomSeconds,
-      hitTargetRounds,
-    };
-
-    setFavoritesByCategory((current) => {
-      const categoryItems = current[selectedCategory] ?? [];
-      const nextCategoryItems = [
-        ...categoryItems.filter((item) => item.name !== trimmed),
-        favorite,
-      ];
-      const next = { ...current, [selectedCategory]: nextCategoryItems };
-      localStorage.setItem(favoritesByCategoryStorageKey, JSON.stringify(next));
-      return next;
-    });
-    setSelectedFavoriteName(trimmed);
-    setStatusText(`Favorit "${trimmed}" gespeichert.`);
-    setErrorText("");
-  };
-
-  const loadCategoryFavorite = (nameOverride?: string) => {
-    const targetName = nameOverride ?? selectedFavoriteName;
-    const favorite = (favoritesByCategory[selectedCategory] ?? []).find(
-      (item) => item.name === targetName,
-    );
-    if (!favorite) {
-      setErrorText("Bitte zuerst einen Favoriten auswählen.");
-      return;
-    }
-
-    const missingExercises = favorite.entries
-      .map((entry) => entry.exercise)
-      .filter((exercise) => !allExercisesForCategory.includes(exercise));
-
-    if (missingExercises.length > 0) {
-      setCustomExercisesByCategory((current) => {
-        const existing = current[selectedCategory] ?? [];
-        const next = {
-          ...current,
-          [selectedCategory]: Array.from(new Set([...existing, ...missingExercises])),
-        };
-        localStorage.setItem(customExercisesStorageKey, JSON.stringify(next));
-        return next;
-      });
-    }
-
-    setEntries((current) => {
-      const byExercise = new Map(current.map((entry) => [entry.exercise, entry]));
-      for (const entry of favorite.entries) {
-        byExercise.set(entry.exercise, entry);
-      }
-      return Array.from(byExercise.values());
-    });
-    setReflection(normalizeReflection(favorite.reflection));
-    setExerciseCustomSeconds(favorite.exerciseCustomSeconds);
-    setHitTargetRounds(favorite.hitTargetRounds || 3);
-    setHitCurrentRound(1);
-    if (selectedCategory === "Bodybuilding") {
-      setSelectedBodybuildingPlanExercises(favorite.entries.map((entry) => entry.exercise));
-    }
-    setSelectedFavoriteName(favorite.name);
-    rememberQuickLoad("favorite", favorite.name);
-    setBodybuildingFlowActive(false);
-    setBodybuildingFocusExercise(null);
-    setStatusText(`Favorit "${favorite.name}" geladen.`);
     setErrorText("");
   };
 
@@ -2984,6 +3291,50 @@ export function RoutineJournal({
     nowMs,
   ]);
 
+  useEffect(() => {
+    if (!phaseEndsAtMs) {
+      return;
+    }
+    if (intervalPhase !== "prep" && intervalPhase !== "work" && intervalPhase !== "rest") {
+      return;
+    }
+    if (nowMs < phaseEndsAtMs) {
+      return;
+    }
+    handleIntervalPhaseEnd();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nowMs, phaseEndsAtMs, intervalPhase]);
+
+  useEffect(() => {
+    return () => {
+      cancelScheduledCues();
+    };
+  }, []);
+
+  const phaseRemainingSeconds = phaseEndsAtMs
+    ? Math.max(0, Math.ceil((phaseEndsAtMs - nowMs) / 1000))
+    : 0;
+  const phaseProgress =
+    phaseTotalSeconds > 0
+      ? Math.max(0, Math.min(1, phaseRemainingSeconds / phaseTotalSeconds))
+      : 0;
+  const phaseUpcomingExercise =
+    intervalPhase === "rest"
+      ? phaseExercise
+      : resolveNextIntervalStep(phaseExercise, phaseRound)?.exercise ?? null;
+  const phaseTheme =
+    intervalPhase === "work"
+      ? {
+          label: intervalSettings.profile === "calm" ? "HALTEN" : "WORK",
+          surface: "bg-green-700",
+          ring: "#bbf7d0",
+        }
+      : intervalPhase === "rest"
+        ? { label: "PAUSE", surface: "bg-blue-800", ring: "#bfdbfe" }
+        : intervalPhase === "prep"
+          ? { label: "GLEICH LOS", surface: "bg-amber-700", ring: "#fde68a" }
+          : { label: "FERTIG", surface: "bg-violet-800", ring: "#ddd6fe" };
+
   const activeHeroExercise =
     isFlowCategory && morningFlowActive && activeExerciseTimer
       ? activeExerciseTimer.exercise
@@ -3019,9 +3370,18 @@ export function RoutineJournal({
       })()
     : null;
 
-  const completedExercises = visibleEntries.filter((e) => e.completed).map((e) => e.exercise);
+  const flowExerciseStates = activeExercises.map((exercise) => {
+    const matchingEntry = visibleEntries.find((entry) => entry.exercise === exercise);
+    const done = matchingEntry?.completed ?? false;
+    const active = activeHeroExercise === exercise;
+    return { exercise, done, active };
+  });
 
-  const encouragementLine = encouragement[Math.floor(nowMs / 8000) % encouragement.length];
+  // Time-derived copy must stay stable until after hydration, otherwise the
+  // server and client render different strings.
+  const encouragementLine = hasMounted
+    ? encouragement[Math.floor(nowMs / 8000) % encouragement.length]
+    : encouragement[0];
   const exerciseDurationOptions = ["all", ...new Set(overviewStats.topExerciseDurations.map((item) => item.name))];
   const filteredExerciseDurations =
     exerciseDurationFilter === "all"
@@ -3097,36 +3457,67 @@ export function RoutineJournal({
     setWorkoutCardOpenExercise(firstIncomplete ?? displayEntries[0].exercise);
   }, [displayEntries, isFlowCategory, workoutCardOpenExercise]);
 
-  const loadLastQuickLoad = () => {
-    if (!categoryLastQuickLoad) {
-      setErrorText("Kein Quick-Load für diese Kategorie gespeichert.");
+  const startWorkoutSession = () => {
+    if (!overallStartedAtMs) {
+      setOverallStartedAtMs(Date.now());
+    }
+    const firstExercise = currentWorkoutExercise ?? visibleEntries[0]?.exercise;
+    if (firstExercise) {
+      startExerciseTimer(firstExercise);
+      setWorkoutCardOpenExercise(firstExercise);
+    }
+    setStatusText(isHitWorkout ? "HIT gestartet." : "Training gestartet.");
+    setErrorText("");
+  };
+
+  const pauseWorkoutSession = () => {
+    if (activeExerciseTimer) {
+      pauseExerciseTimer(activeExerciseTimer.exercise);
+    }
+    if (overallStartedAtMs) {
+      const delta = Math.max(0, Math.floor((Date.now() - overallStartedAtMs) / 1000));
+      setOverallBaseSeconds((current) => current + delta);
+      setOverallStartedAtMs(null);
+    }
+    setStatusText(isHitWorkout ? "HIT pausiert." : "Training pausiert.");
+    setErrorText("");
+  };
+
+  const advanceHitRound = () => {
+    if (hitCurrentRound >= hitTargetRounds) {
+      setStatusText(`HIT abgeschlossen: ${hitTargetRounds}/${hitTargetRounds} Runden geschafft.`);
+      setErrorText("");
       return;
     }
-    switch (categoryLastQuickLoad.type) {
-      case "favorite":
-        loadCategoryFavorite(categoryLastQuickLoad.name);
-        break;
-      case "builder":
-        loadWorkoutBuilderTemplate(categoryLastQuickLoad.name);
-        break;
-      case "hit-set":
-        loadHitWorkoutSet(categoryLastQuickLoad.name);
-        break;
-      case "bb-plan":
-        if (bodybuildingPlanMap[categoryLastQuickLoad.name]) {
-          applyPresetBodybuildingPlan(categoryLastQuickLoad.name);
-        } else {
-          loadBodybuildingPlan(categoryLastQuickLoad.name);
-        }
-        break;
-      default:
-        setErrorText("Unbekannter Quick-Load-Typ.");
+    const visibleNames = new Set(visibleEntries.map((entry) => entry.exercise));
+    setEntries((current) =>
+      current.map((entry) =>
+        visibleNames.has(entry.exercise)
+          ? {
+              ...entry,
+              completed: false,
+              completedSets: 0,
+              setLogs: entry.setLogs.map((setLog) => ({ ...setLog, done: false })),
+            }
+          : entry,
+      ),
+    );
+    const firstExercise = visibleEntries[0]?.exercise ?? null;
+    if (firstExercise) {
+      setWorkoutCardOpenExercise(firstExercise);
+      startExerciseTimer(firstExercise);
     }
+    setHitCurrentRound((current) => current + 1);
+    setStatusText(`Runde ${hitCurrentRound} erledigt. Starte Runde ${hitCurrentRound + 1}.`);
+    setErrorText("");
   };
 
   const runStickyDoneNext = () => {
     if (!currentWorkoutEntry) {
       return;
+    }
+    if (!overallStartedAtMs) {
+      setOverallStartedAtMs(Date.now());
     }
     if (isBodybuilding) {
       const completed = completeBodybuildingAndNext(currentWorkoutEntry.exercise);
@@ -3138,8 +3529,16 @@ export function RoutineJournal({
           ?.exercise ?? null;
       if (nextFocus) {
         setWorkoutCardOpenExercise(nextFocus);
+        startExerciseTimer(nextFocus);
       }
       return;
+    }
+    if (isHitWorkout) {
+      const repsValue = Number.parseInt(currentWorkoutEntry.reps || "", 10);
+      if (Number.isNaN(repsValue) || repsValue <= 0) {
+        setErrorText("Für HIT bitte Reps > 0 eintragen, dann Done & Next drücken.");
+        return;
+      }
     }
     handleCompletedToggle(currentWorkoutEntry.exercise, true);
     if (activeExerciseTimer?.exercise === currentWorkoutEntry.exercise) {
@@ -3147,9 +3546,16 @@ export function RoutineJournal({
     }
     if (nextWorkoutExercise) {
       setWorkoutCardOpenExercise(nextWorkoutExercise);
+      startExerciseTimer(nextWorkoutExercise);
       setStatusText(`Erledigt. Weiter mit: ${nextWorkoutExercise}`);
+      setErrorText("");
+      return;
+    }
+    if (isHitWorkout) {
+      advanceHitRound();
     } else {
       setStatusText("Workout abgeschlossen - starke Session!");
+      setErrorText("");
     }
   };
 
@@ -3169,6 +3575,32 @@ export function RoutineJournal({
   };
 
   const weightUnitLabel = profile.weightUnit;
+  const restTimerRemaining = restTimerEndsAtMs
+    ? Math.max(0, Math.ceil((restTimerEndsAtMs - nowMs) / 1000))
+    : 0;
+  const currentStreak = (() => {
+    const doneDays = new Set(
+      overviewStats.monthView.filter((day) => day.done).map((day) => day.key),
+    );
+    overviewStats.weekView.forEach((day) => {
+      if (day.done) doneDays.add(day.key);
+    });
+    let streak = 0;
+    for (let offset = 0; offset < 120; offset += 1) {
+      const date = new Date();
+      date.setDate(date.getDate() - offset);
+      const key = getDateKeyFromDate(date);
+      if (doneDays.has(key)) {
+        streak += 1;
+        continue;
+      }
+      if (offset === 0) {
+        continue; // today may still be pending
+      }
+      break;
+    }
+    return streak;
+  })();
   const weightTrendValues = overviewStats.weightTrend.filter(
     (item): item is { key: string; value: number } => item.value !== null,
   );
@@ -3256,7 +3688,7 @@ export function RoutineJournal({
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-rose-500">
               Motivation
             </p>
-            <h1 className="mt-2 text-2xl font-black text-rose-700 sm:text-3xl">
+            <h1 className="mt-2 text-2xl font-black text-rose-700 sm:text-3xl dark:text-rose-300">
               Einfach machen Bljad. 💪 Für eine bessere Zukunft. Für LUIS. ❤️ 👨‍👩‍👦
             </h1>
           </div>
@@ -3270,7 +3702,9 @@ export function RoutineJournal({
             Sportlich motivierend. Ruhig wie ein Tagebuch.
           </h1>
           <p className="mt-2 text-sm font-medium text-cyan-50/90">
-            {encouragement[new Date().getDate() % encouragement.length]}
+            {hasMounted
+              ? encouragement[new Date().getDate() % encouragement.length]
+              : encouragement[0]}
           </p>
         </header>
       )}
@@ -3585,7 +4019,7 @@ export function RoutineJournal({
                 </select>
               </label>
             </div>
-            <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-800">
+            <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-800 dark:text-emerald-300 dark:bg-emerald-900/40">
               {overviewStats.totalSessions} Sessions
             </span>
           </div>
@@ -3613,60 +4047,60 @@ export function RoutineJournal({
             ))}
           </div>
           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-lg bg-emerald-50 p-3">
-              <p className="text-xs uppercase tracking-[0.12em] text-emerald-700">Absolviert</p>
-              <p className="mt-2 text-2xl font-black text-emerald-900">{overviewStats.totalSessions}</p>
+            <div className="rounded-lg bg-emerald-50 p-3 dark:bg-emerald-950/40">
+              <p className="text-xs uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-300">Absolviert</p>
+              <p className="mt-2 text-2xl font-black text-emerald-900 dark:text-emerald-200">{overviewStats.totalSessions}</p>
             </div>
-            <div className="rounded-lg bg-cyan-50 p-3">
-              <p className="text-xs uppercase tracking-[0.12em] text-cyan-700">Übungen</p>
-              <p className="mt-2 text-2xl font-black text-cyan-900">{overviewStats.totalCompleted}</p>
+            <div className="rounded-lg bg-cyan-50 p-3 dark:bg-cyan-950/40">
+              <p className="text-xs uppercase tracking-[0.12em] text-cyan-700 dark:text-cyan-300">Übungen</p>
+              <p className="mt-2 text-2xl font-black text-cyan-900 dark:text-cyan-200">{overviewStats.totalCompleted}</p>
             </div>
-            <div className="rounded-lg bg-violet-50 p-3">
-              <p className="text-xs uppercase tracking-[0.12em] text-violet-700">Top Übung</p>
-              <p className="mt-2 text-sm font-black text-violet-900">
+            <div className="rounded-lg bg-violet-50 p-3 dark:bg-violet-950/40">
+              <p className="text-xs uppercase tracking-[0.12em] text-violet-700 dark:text-violet-300">Top Übung</p>
+              <p className="mt-2 text-sm font-black text-violet-900 dark:text-violet-200">
                 {overviewStats.topExercises[0]?.name ?? "Noch keine"}
               </p>
             </div>
-            <div className="rounded-lg bg-amber-50 p-3">
-              <p className="text-xs uppercase tracking-[0.12em] text-amber-700">Streak</p>
-              <p className="mt-2 text-2xl font-black text-amber-900">
-                {overviewStats.recent7Days.filter((day) => day.count > 0).length}
+            <div className="rounded-lg bg-amber-50 p-3 dark:bg-amber-950/40">
+              <p className="text-xs uppercase tracking-[0.12em] text-amber-700 dark:text-amber-300">🔥 Streak</p>
+              <p className="mt-2 text-2xl font-black text-amber-900 dark:text-amber-200">
+                {currentStreak} {currentStreak === 1 ? "Tag" : "Tage"}
               </p>
             </div>
-            <div className="rounded-lg bg-sky-50 p-3">
-              <p className="text-xs uppercase tracking-[0.12em] text-sky-700">Aktuelles Gewicht</p>
-              <p className="mt-2 text-2xl font-black text-sky-900">
+            <div className="rounded-lg bg-sky-50 p-3 dark:bg-sky-950/40">
+              <p className="text-xs uppercase tracking-[0.12em] text-sky-700 dark:text-sky-300">Aktuelles Gewicht</p>
+              <p className="mt-2 text-2xl font-black text-sky-900 dark:text-sky-200">
                 {latestWeight !== null ? `${latestWeight} ${weightUnitLabel}` : "—"}
               </p>
             </div>
-            <div className="rounded-lg bg-indigo-50 p-3">
+            <div className="rounded-lg bg-indigo-50 p-3 dark:bg-indigo-950/40">
               <p className="text-xs uppercase tracking-[0.12em] text-indigo-700">Ø Woche / Monat</p>
-              <p className="mt-2 text-sm font-black text-indigo-900">
+              <p className="mt-2 text-sm font-black text-indigo-900 dark:text-indigo-200">
                 {avgLast7Weight !== null ? `${avgLast7Weight} ${weightUnitLabel}` : "—"} /{" "}
                 {avgLast30Weight !== null ? `${avgLast30Weight} ${weightUnitLabel}` : "—"}
               </p>
             </div>
-            <div className="rounded-lg bg-rose-50 p-3">
-              <p className="text-xs uppercase tracking-[0.12em] text-rose-700">Reduktion Vorwoche</p>
-              <p className="mt-2 text-sm font-black text-rose-900">
+            <div className="rounded-lg bg-rose-50 p-3 dark:bg-rose-950/40">
+              <p className="text-xs uppercase tracking-[0.12em] text-rose-700 dark:text-rose-300">Reduktion Vorwoche</p>
+              <p className="mt-2 text-sm font-black text-rose-900 dark:text-rose-200">
                 {weekReduction !== null ? `${weekReduction > 0 ? "-" : "+"}${Math.abs(weekReduction).toFixed(1)} ${weightUnitLabel}` : "—"}
               </p>
             </div>
-            <div className="rounded-lg bg-fuchsia-50 p-3">
+            <div className="rounded-lg bg-fuchsia-50 p-3 dark:bg-fuchsia-950/40">
               <p className="text-xs uppercase tracking-[0.12em] text-fuchsia-700">Reduktion Vormonat</p>
-              <p className="mt-2 text-sm font-black text-fuchsia-900">
+              <p className="mt-2 text-sm font-black text-fuchsia-900 dark:text-fuchsia-200">
                 {monthReduction !== null ? `${monthReduction > 0 ? "-" : "+"}${Math.abs(monthReduction).toFixed(1)} ${weightUnitLabel}` : "—"}
               </p>
             </div>
-            <div className="rounded-lg bg-lime-50 p-3">
-              <p className="text-xs uppercase tracking-[0.12em] text-lime-700">Gesamt Workoutzeit</p>
-              <p className="mt-2 text-sm font-black text-lime-900">
+            <div className="rounded-lg bg-lime-50 p-3 dark:bg-lime-950/40">
+              <p className="text-xs uppercase tracking-[0.12em] text-lime-700 dark:text-lime-300">Gesamt Workoutzeit</p>
+              <p className="mt-2 text-sm font-black text-lime-900 dark:text-lime-200">
                 {formatDurationCompact(overviewStats.totalWorkoutSeconds)}
               </p>
             </div>
-            <div className="rounded-lg bg-orange-50 p-3">
-              <p className="text-xs uppercase tracking-[0.12em] text-orange-700">Ø Dauer pro Session</p>
-              <p className="mt-2 text-sm font-black text-orange-900">
+            <div className="rounded-lg bg-orange-50 p-3 dark:bg-orange-950/40">
+              <p className="text-xs uppercase tracking-[0.12em] text-orange-700 dark:text-orange-300">Ø Dauer pro Session</p>
+              <p className="mt-2 text-sm font-black text-orange-900 dark:text-orange-200">
                 {formatDurationCompact(overviewStats.avgWorkoutSeconds)}
               </p>
             </div>
@@ -3675,7 +4109,7 @@ export function RoutineJournal({
           {dashboardGraphConfig.consistency ? (
             <div className="mt-4 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
                   Wochenview (Mo-So)
                 </p>
                 <div className="mt-2 grid grid-cols-7 gap-2">
@@ -3704,22 +4138,22 @@ export function RoutineJournal({
                       >
                         {day.done ? "✓" : "–"}
                       </div>
-                      <div className="mt-1 text-[10px] font-semibold text-slate-500">{day.count}</div>
+                      <div className="mt-1 text-[10px] font-semibold text-slate-500 dark:text-slate-400">{day.count}</div>
                     </button>
                   ))}
                 </div>
               </div>
 
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
                   Häufigste Übungen
                 </p>
               <ul className="mt-2 space-y-2">
                 {overviewStats.topExercises.length === 0 ? (
-                  <li className="text-sm text-slate-500">Noch keine erledigten Übungen gespeichert.</li>
+                  <li className="text-sm text-slate-500 dark:text-slate-400">Noch keine erledigten Übungen gespeichert.</li>
                 ) : (
                   overviewStats.topExercises.map((item, index) => (
-                    <li key={item.name} className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm">
+                    <li key={item.name} className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm dark:bg-slate-900 dark:border-slate-700">
                       <span className="font-medium text-slate-700 dark:text-slate-200">
                         {index + 1}. {item.name}
                       </span>
@@ -3909,7 +4343,7 @@ export function RoutineJournal({
           ) : null}
 
           <div className="mt-4">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-300">
               Monatsview ({overviewStats.monthLabel})
             </p>
             <div className="mt-2 grid grid-cols-7 gap-1.5">
@@ -3981,7 +4415,7 @@ export function RoutineJournal({
                 setBodybuildingFocusExercise(null);
                 setSelectedDate(getTodayDateKey());
               }}
-              className="touch-manipulation rounded-lg border border-teal-500 bg-teal-50 px-3 py-2.5 font-semibold text-teal-800"
+              className="touch-manipulation rounded-lg border border-teal-500 bg-teal-50 px-3 py-2.5 font-semibold text-teal-800 dark:text-teal-300 dark:bg-teal-950/40"
             >
               Today
             </button>
@@ -4067,7 +4501,7 @@ export function RoutineJournal({
           Routine Builder ({selectedCategory})
           </p>
         <p className="mt-1 text-xs text-teal-800 dark:text-teal-300">
-          Stelle hier deine Routine zusammen. Das aktive Workout läuft im Tab "Workout".
+          Stelle hier deine Routine zusammen. Das aktive Workout läuft im Tab &quot;Workout&quot;.
           </p>
           <>
           <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
@@ -4075,7 +4509,7 @@ export function RoutineJournal({
               value={workoutBuilderName}
               onChange={(event) => setWorkoutBuilderName(event.target.value)}
               placeholder="Name für Builder-Template"
-              className="rounded-md border border-teal-300 bg-slate-50 px-3 py-2.5 text-sm text-slate-900"
+              className="rounded-md border border-teal-300 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:text-slate-100 dark:bg-slate-900 dark:border-teal-800"
             />
             <button
               type="button"
@@ -4089,7 +4523,7 @@ export function RoutineJournal({
             <select
               value={selectedWorkoutBuilderName}
               onChange={(event) => setSelectedWorkoutBuilderName(event.target.value)}
-              className="rounded-md border border-teal-300 bg-slate-50 px-3 py-2.5 text-sm text-slate-900"
+              className="rounded-md border border-teal-300 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:text-slate-100 dark:bg-slate-900 dark:border-teal-800"
             >
               <option value="">Builder-Template wählen</option>
               {(workoutBuilderTemplates[selectedCategory] ?? []).map((template) => (
@@ -4101,7 +4535,7 @@ export function RoutineJournal({
             <button
               type="button"
               onClick={() => loadWorkoutBuilderTemplate()}
-              className="touch-manipulation rounded-lg border border-teal-700 px-3 py-2.5 text-sm font-semibold text-teal-800"
+              className="touch-manipulation rounded-lg border border-teal-700 px-3 py-2.5 text-sm font-semibold text-teal-800 dark:text-teal-300"
             >
               Builder/Preset laden
             </button>
@@ -4151,7 +4585,7 @@ export function RoutineJournal({
                   value={newBodybuildingPlanName}
                   onChange={(event) => setNewBodybuildingPlanName(event.target.value)}
                   placeholder="Bodybuilding Planname"
-                  className="rounded-md border border-teal-300 bg-slate-50 px-3 py-2 text-sm text-slate-900"
+                  className="rounded-md border border-teal-300 bg-slate-50 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 dark:bg-slate-900 dark:border-teal-800"
                 />
                 <button
                   type="button"
@@ -4165,7 +4599,7 @@ export function RoutineJournal({
                 <select
                   value={selectedBodybuildingPlanName}
                   onChange={(event) => setSelectedBodybuildingPlanName(event.target.value)}
-                  className="rounded-md border border-teal-300 bg-slate-50 px-3 py-2 text-sm text-slate-900"
+                  className="rounded-md border border-teal-300 bg-slate-50 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 dark:bg-slate-900 dark:border-teal-800"
                 >
                   <option value="">Bodybuilding Plan wählen</option>
                   {Object.keys(bodybuildingPlanMap).map((plan) => (
@@ -4188,7 +4622,7 @@ export function RoutineJournal({
                     }
                     loadBodybuildingPlan();
                   }}
-                  className="rounded-lg border border-indigo-700 px-3 py-2 text-sm font-semibold text-indigo-800"
+                  className="rounded-lg border border-indigo-700 px-3 py-2 text-sm font-semibold text-indigo-800 dark:text-indigo-300"
                 >
                   Plan laden
                 </button>
@@ -4196,7 +4630,7 @@ export function RoutineJournal({
               <button
                 type="button"
                 onClick={applyBodybuildingSelection}
-                className="mt-2 rounded-lg border border-indigo-700 px-3 py-2 text-xs font-semibold text-indigo-800"
+                className="mt-2 rounded-lg border border-indigo-700 px-3 py-2 text-xs font-semibold text-indigo-800 dark:text-indigo-300"
               >
                 Bodybuilding-Auswahl anwenden
               </button>
@@ -4221,13 +4655,13 @@ export function RoutineJournal({
           <button
             type="button"
             onClick={() => setShowAdvancedBuilderFields((current) => !current)}
-            className="mt-2 rounded-lg border border-teal-300 bg-slate-100 px-3 py-1.5 text-xs font-semibold text-teal-800"
+            className="mt-2 rounded-lg border border-teal-300 bg-slate-100 px-3 py-1.5 text-xs font-semibold text-teal-800 dark:text-teal-300 dark:bg-slate-800 dark:border-teal-800"
           >
             {showAdvancedBuilderFields ? "Advanced Optionen ausblenden" : "Advanced Optionen anzeigen"}
           </button>
           <div className="mt-3 grid gap-2">
             {filteredBuilderEntries.length === 0 ? (
-              <p className="rounded-md border border-teal-200 bg-slate-100 px-3 py-2 text-xs text-slate-600">
+              <p className="rounded-md border border-teal-200 bg-slate-100 px-3 py-2 text-xs text-slate-600 dark:text-slate-300 dark:bg-slate-800 dark:border-teal-800">
                 Keine Übungen für diese Muskelgruppe in der aktuellen Kategorie.
               </p>
             ) : null}
@@ -4237,7 +4671,7 @@ export function RoutineJournal({
               return (
                 <div
                   key={`builder-${entry.exercise}`}
-                  className="rounded-md border border-teal-200 bg-slate-100 p-2"
+                  className="rounded-md border border-teal-200 bg-slate-100 p-2 dark:bg-slate-800 dark:border-teal-800"
                   draggable
                   onDragStart={() => setDraggingExercise(entry.exercise)}
                   onDragOver={(event) => event.preventDefault()}
@@ -4250,7 +4684,7 @@ export function RoutineJournal({
                   onDragEnd={() => setDraggingExercise(null)}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <label className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                    <label className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
                       <input
                         type="checkbox"
                         checked={enabled}
@@ -4267,7 +4701,7 @@ export function RoutineJournal({
                       drag
                     </span>
                     {isFlowCategory ? (
-                      <span className="text-xs text-slate-600">
+                      <span className="text-xs text-slate-600 dark:text-slate-300">
                         {getExerciseTargetSeconds(
                           exerciseCustomSeconds,
                           entry.exercise,
@@ -4280,7 +4714,7 @@ export function RoutineJournal({
                   {enabled ? (
                     <>
                       <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                        <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                        <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                           Sätze
                           <input
                             type="number"
@@ -4289,10 +4723,10 @@ export function RoutineJournal({
                             onChange={(event) =>
                               handleSetCountChange(entry.exercise, event.target.value)
                             }
-                            className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
+                            className="rounded-md border border-slate-300 px-2 py-1 text-slate-900 dark:text-slate-100 dark:border-slate-700"
                           />
                         </label>
-                        <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                        <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                           Reps
                           <input
                             type="number"
@@ -4301,11 +4735,11 @@ export function RoutineJournal({
                             onChange={(event) =>
                               handleEntryChange(entry.exercise, { reps: event.target.value })
                             }
-                            className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
+                            className="rounded-md border border-slate-300 px-2 py-1 text-slate-900 dark:text-slate-100 dark:border-slate-700"
                           />
                         </label>
                         {isBodybuilding ? (
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                             Gewicht {weightUnitLabel}
                             <input
                               type="number"
@@ -4315,12 +4749,12 @@ export function RoutineJournal({
                               onChange={(event) =>
                                 handleEntryChange(entry.exercise, { weightKg: event.target.value })
                               }
-                              className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
+                              className="rounded-md border border-slate-300 px-2 py-1 text-slate-900 dark:text-slate-100 dark:border-slate-700"
                             />
                           </label>
                         ) : null}
                         {isFlowCategory ? (
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                             Flow Sekunden
                             <input
                               type="number"
@@ -4340,14 +4774,14 @@ export function RoutineJournal({
                                   ),
                                 }))
                               }
-                              className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
+                              className="rounded-md border border-slate-300 px-2 py-1 text-slate-900 dark:text-slate-100 dark:border-slate-700"
                             />
                           </label>
                         ) : null}
                       </div>
                       {showAdvancedBuilderFields ? (
                         <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                             Dauer min
                             <input
                               type="number"
@@ -4358,10 +4792,10 @@ export function RoutineJournal({
                                   durationMinutes: event.target.value,
                                 })
                               }
-                              className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
+                              className="rounded-md border border-slate-300 px-2 py-1 text-slate-900 dark:text-slate-100 dark:border-slate-700"
                             />
                           </label>
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                             Ziel min
                             <input
                               type="number"
@@ -4372,7 +4806,7 @@ export function RoutineJournal({
                                   targetMinutes: event.target.value,
                                 })
                               }
-                              className="rounded-md border border-slate-300 px-2 py-1 text-slate-900"
+                              className="rounded-md border border-slate-300 px-2 py-1 text-slate-900 dark:text-slate-100 dark:border-slate-700"
                             />
                           </label>
                         </div>
@@ -4402,9 +4836,9 @@ export function RoutineJournal({
                   </button>
                 ) : null}
                 {currentWorkoutEntry ? (
-                  <span className="rounded-full bg-indigo-100 px-2.5 py-1 text-[11px] font-semibold text-indigo-900">
-                    Fokus: {currentWorkoutEntry.exercise}
-                  </span>
+                  <div className="rounded-lg border border-indigo-300 bg-indigo-700 px-3 py-1.5 text-sm font-black text-white shadow-sm dark:border-indigo-800">
+                    Aktuell: {currentWorkoutEntry.exercise}
+                  </div>
                 ) : null}
               </div>
             </div>
@@ -4429,7 +4863,7 @@ export function RoutineJournal({
               </div>
             ) : null}
             {loadingEntries ? (
-              <p className="mt-2 text-sm font-medium text-slate-700">Lade Cloud-Daten ...</p>
+              <p className="mt-2 text-sm font-medium text-slate-700 dark:text-slate-200">Lade Cloud-Daten ...</p>
             ) : (
               <div className="mt-2 grid gap-3">
                 {displayEntries.map((entry) => {
@@ -4478,26 +4912,13 @@ export function RoutineJournal({
                             <p className="text-xs font-semibold text-cyan-900 dark:text-cyan-200">
                               Getrackte Zeit: {formatSeconds(liveTrackedSeconds)}
                             </p>
-                            <div className="mt-1 flex flex-wrap gap-2">
-                              <button
-                                type="button"
-                                onClick={() => startExerciseTimer(entry.exercise)}
-                                className="touch-manipulation rounded-md bg-cyan-700 px-2.5 py-1.5 text-xs font-semibold text-white"
-                              >
-                                Start
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => pauseExerciseTimer(entry.exercise)}
-                                className="touch-manipulation rounded-md border border-cyan-700 px-2.5 py-1.5 text-xs font-semibold text-cyan-900"
-                              >
-                                Stop
-                              </button>
-                            </div>
+                            <p className="mt-1 text-[11px] font-medium text-cyan-700 dark:text-cyan-300">
+                              Zeit läuft über Session Start/Pause und wechselt automatisch bei Done & Next.
+                            </p>
                           </div>
 
                           <div className="mt-3 grid gap-2 sm:grid-cols-4">
-                            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                               Sätze
                               <input
                                 type="number"
@@ -4506,10 +4927,10 @@ export function RoutineJournal({
                                 onChange={(event) =>
                                   handleSetCountChange(entry.exercise, event.target.value)
                                 }
-                                className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                                className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                               />
                             </label>
-                            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                               Reps
                               <input
                                 type="number"
@@ -4518,10 +4939,10 @@ export function RoutineJournal({
                                 onChange={(event) =>
                                   handleEntryChange(entry.exercise, { reps: event.target.value })
                                 }
-                                className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                                className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                               />
                             </label>
-                            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                               Gewicht {weightUnitLabel}
                               <input
                                 type="number"
@@ -4531,10 +4952,10 @@ export function RoutineJournal({
                                 onChange={(event) =>
                                   handleEntryChange(entry.exercise, { weightKg: event.target.value })
                                 }
-                                className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                                className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                               />
                             </label>
-                            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                            <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                               Dauer min
                               <input
                                 type="number"
@@ -4545,23 +4966,46 @@ export function RoutineJournal({
                                     durationMinutes: event.target.value,
                                   })
                                 }
-                                className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                                className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                               />
                             </label>
                           </div>
 
                           {isBodybuilding && Number.parseInt(entry.sets || "0", 10) > 0 ? (
-                            <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-2">
-                              <p className="text-xs font-semibold text-emerald-900">
-                                Satz-Tracker: {entry.completedSets} / {entry.sets}
-                              </p>
+                            <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-2 dark:border-emerald-800 dark:bg-emerald-950/30">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="text-xs font-semibold text-emerald-900 dark:text-emerald-200">
+                                  Satz-Tracker: {entry.completedSets} / {entry.sets}
+                                </p>
+                                {lastSetValues[entry.exercise] ? (
+                                  <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600 dark:bg-slate-900 dark:text-slate-300">
+                                    Zuletzt: {lastSetValues[entry.exercise].weightKg} {weightUnitLabel} ×{" "}
+                                    {lastSetValues[entry.exercise].reps}
+                                  </span>
+                                ) : null}
+                              </div>
                               <div className="mt-2 space-y-2">
-                                {entry.setLogs.map((setLog, setIndex) => (
+                                {entry.setLogs.map((setLog, setIndex) => {
+                                  const ghost = lastSetValues[entry.exercise];
+                                  const currentWeight = Number.parseFloat(setLog.weightKg || "0") || 0;
+                                  const adjustWeight = (delta: number) =>
+                                    updateSetLogValue(
+                                      entry.exercise,
+                                      setIndex,
+                                      "weightKg",
+                                      String(Math.max(0, Math.round((currentWeight + delta) * 100) / 100)),
+                                    );
+                                  return (
                                   <div
                                     key={`${entry.exercise}-set-${setIndex + 1}`}
-                                    className="grid gap-2 rounded-md border border-emerald-200 bg-white p-2 sm:grid-cols-[64px_1fr_1fr_auto]"
+                                    className={`rounded-md border p-2 ${
+                                      setLog.done
+                                        ? "border-emerald-400 bg-emerald-100 dark:border-emerald-600 dark:bg-emerald-900/40"
+                                        : "border-emerald-200 bg-white dark:border-slate-700 dark:bg-slate-900"
+                                    }`}
                                   >
-                                    <span className="self-center text-xs font-semibold text-emerald-900">
+                                    <div className="grid gap-2 sm:grid-cols-[64px_1fr_1fr_auto]">
+                                    <span className="self-center text-xs font-bold text-emerald-900 dark:text-emerald-200">
                                       Satz {setIndex + 1}
                                     </span>
                                     <input
@@ -4576,8 +5020,8 @@ export function RoutineJournal({
                                           event.target.value,
                                         )
                                       }
-                                      placeholder="Reps"
-                                      className="rounded-md border border-slate-400 px-2 py-1 text-xs text-slate-900"
+                                      placeholder={ghost ? `${ghost.reps} Reps` : "Reps"}
+                                      className="min-h-11 rounded-md border border-slate-400 px-2 py-1 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
                                     />
                                     <input
                                       type="number"
@@ -4592,21 +5036,49 @@ export function RoutineJournal({
                                           event.target.value,
                                         )
                                       }
-                                      placeholder={`Gewicht ${weightUnitLabel}`}
-                                      className="rounded-md border border-slate-400 px-2 py-1 text-xs text-slate-900"
+                                      placeholder={ghost ? `${ghost.weightKg} ${weightUnitLabel}` : `Gewicht ${weightUnitLabel}`}
+                                      className="min-h-11 rounded-md border border-slate-400 px-2 py-1 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
                                     />
-                                    <label className="flex items-center gap-1 self-center text-xs font-semibold text-emerald-900">
-                                      <input
-                                        type="checkbox"
-                                        checked={setLog.done}
-                                        onChange={(event) =>
-                                          toggleSetDone(entry.exercise, setIndex, event.target.checked)
-                                        }
-                                      />
-                                      Done
-                                    </label>
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleSetDone(entry.exercise, setIndex, !setLog.done)}
+                                      className={`min-h-11 min-w-16 rounded-md px-3 text-sm font-bold ${
+                                        setLog.done
+                                          ? "bg-emerald-600 text-white"
+                                          : "border-2 border-emerald-600 text-emerald-800 dark:text-emerald-300"
+                                      }`}
+                                      aria-pressed={setLog.done}
+                                    >
+                                      {setLog.done ? "✓" : "Done"}
+                                    </button>
+                                    </div>
+                                    <div className="mt-2 flex flex-wrap gap-1.5">
+                                      {ghost ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            updateSetLogValue(entry.exercise, setIndex, "reps", ghost.reps);
+                                            updateSetLogValue(entry.exercise, setIndex, "weightKg", ghost.weightKg);
+                                          }}
+                                          className="min-h-9 rounded-full border border-slate-300 px-3 text-xs font-semibold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                                        >
+                                          ↺ Wie zuletzt
+                                        </button>
+                                      ) : null}
+                                      {[-5, -2.5, 2.5, 5].map((delta) => (
+                                        <button
+                                          key={`adjust-${entry.exercise}-${setIndex}-${delta}`}
+                                          type="button"
+                                          onClick={() => adjustWeight(delta)}
+                                          className="min-h-9 min-w-12 rounded-full border border-slate-300 px-2 text-xs font-bold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                                        >
+                                          {delta > 0 ? `+${delta}` : delta}
+                                        </button>
+                                      ))}
+                                    </div>
                                   </div>
-                                ))}
+                                  );
+                                })}
                               </div>
                             </div>
                           ) : null}
@@ -4625,10 +5097,10 @@ export function RoutineJournal({
         ) : null}
 
         {pageViewTab === "training" && isHitWorkout ? (
-          <div className="mt-4 rounded-xl border border-fuchsia-200 bg-fuchsia-50 p-3">
-            <p className="text-sm font-semibold text-fuchsia-900">HIT Runden & Workout-Set</p>
+          <div className="mt-4 rounded-xl border border-fuchsia-200 bg-fuchsia-50 p-3 dark:bg-fuchsia-950/40 dark:border-fuchsia-800">
+            <p className="text-sm font-semibold text-fuchsia-900 dark:text-fuchsia-200">HIT Runden & Workout-Set</p>
             <div className="mt-2 grid gap-2 sm:grid-cols-3">
-              <label className="flex flex-col gap-1 text-xs font-medium text-fuchsia-900">
+              <label className="flex flex-col gap-1 text-xs font-medium text-fuchsia-900 dark:text-fuchsia-200">
                 Ziel-Runden
                 <input
                   type="number"
@@ -4639,10 +5111,10 @@ export function RoutineJournal({
                       Math.max(1, Number.parseInt(event.target.value || "1", 10)),
                     )
                   }
-                  className="rounded-md border border-fuchsia-300 bg-white px-2 py-1.5 text-slate-900"
+                  className="rounded-md border border-fuchsia-300 bg-white px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:bg-slate-900 dark:border-fuchsia-800"
                 />
               </label>
-              <div className="rounded-md border border-fuchsia-200 bg-white px-2 py-1.5 text-xs font-semibold text-fuchsia-900">
+              <div className="rounded-md border border-fuchsia-200 bg-white px-2 py-1.5 text-xs font-semibold text-fuchsia-900 dark:text-fuchsia-200 dark:bg-slate-900 dark:border-fuchsia-800">
                 Runde: {Math.min(hitCurrentRound, hitTargetRounds)} / {hitTargetRounds}
               </div>
               <button
@@ -4653,17 +5125,45 @@ export function RoutineJournal({
                 Runde DONE
               </button>
             </div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              <label className="flex flex-col gap-1 text-xs font-medium text-fuchsia-900 dark:text-fuchsia-200">
+                Belastung pro Übung (Sek.)
+                <input
+                  type="number"
+                  min={5}
+                  max={600}
+                  value={hitWorkSeconds}
+                  onChange={(event) =>
+                    setHitWorkSeconds(Math.max(5, Number.parseInt(event.target.value || "5", 10)))
+                  }
+                  className="rounded-md border border-fuchsia-300 bg-white px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:bg-slate-900 dark:border-fuchsia-800"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium text-fuchsia-900 dark:text-fuchsia-200">
+                Pause zwischen Übungen (Sek.)
+                <input
+                  type="number"
+                  min={0}
+                  max={300}
+                  value={hitRestSeconds}
+                  onChange={(event) =>
+                    setHitRestSeconds(Math.max(0, Number.parseInt(event.target.value || "0", 10)))
+                  }
+                  className="rounded-md border border-fuchsia-300 bg-white px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:bg-slate-900 dark:border-fuchsia-800"
+                />
+              </label>
+            </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
               <input
                 value={newHitSetName}
                 onChange={(event) => setNewHitSetName(event.target.value)}
                 placeholder="Name für HIT-Workout-Set"
-                className="rounded-md border border-fuchsia-300 bg-white px-2 py-2 text-sm text-slate-900"
+                className="rounded-md border border-fuchsia-300 bg-white px-2 py-2 text-sm text-slate-900 dark:text-slate-100 dark:bg-slate-900 dark:border-fuchsia-800"
               />
               <button
                 type="button"
                 onClick={saveHitWorkoutSet}
-                className="rounded-lg border border-fuchsia-600 px-3 py-2 text-sm font-semibold text-fuchsia-800"
+                className="rounded-lg border border-fuchsia-600 px-3 py-2 text-sm font-semibold text-fuchsia-800 dark:text-fuchsia-300"
               >
                 Set speichern
               </button>
@@ -4672,7 +5172,7 @@ export function RoutineJournal({
               <select
                 value={selectedHitSetName}
                 onChange={(event) => setSelectedHitSetName(event.target.value)}
-                className="rounded-md border border-fuchsia-300 bg-white px-2 py-2 text-sm text-slate-900"
+                className="rounded-md border border-fuchsia-300 bg-white px-2 py-2 text-sm text-slate-900 dark:text-slate-100 dark:bg-slate-900 dark:border-fuchsia-800"
               >
                 <option value="">Workout-Set wählen</option>
                 {hitWorkoutSets.map((setItem) => (
@@ -4696,7 +5196,7 @@ export function RoutineJournal({
                     key={`quick-hit-${setItem.name}`}
                     type="button"
                     onClick={() => loadHitWorkoutSet(setItem.name)}
-                    className="rounded-full border border-fuchsia-300 bg-white px-2.5 py-1 text-xs font-semibold text-fuchsia-900"
+                    className="rounded-full border border-fuchsia-300 bg-white px-2.5 py-1 text-xs font-semibold text-fuchsia-900 dark:text-fuchsia-200 dark:bg-slate-900 dark:border-fuchsia-800"
                   >
                     ⚡ {setItem.name}
                   </button>
@@ -4707,119 +5207,197 @@ export function RoutineJournal({
         ) : null}
 
         {pageViewTab === "training" ? (
-          <div className="mt-4 rounded-lg bg-emerald-100 px-3 py-2 text-sm font-medium text-emerald-950">
+          <div className="mt-4 rounded-lg bg-emerald-100 px-3 py-2 text-sm font-medium text-emerald-950 dark:text-emerald-100 dark:bg-emerald-900/40">
             Tagesfortschritt: <strong>{completedCount}</strong> / {visibleEntries.length} erledigt (
             {completionPercent}%)
           </div>
         ) : null}
 
         {pageViewTab === "training" ? (
-        <div className="mt-4 rounded-xl border border-cyan-200 bg-cyan-50 p-3">
-          <p className="text-sm font-semibold text-cyan-950">Overall Timer</p>
-          <p className="mt-1 text-2xl font-bold text-cyan-900">{formatSeconds(overallLiveSeconds)}</p>
-          <div className="mt-2 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                if (!overallStartedAtMs) {
-                  setOverallStartedAtMs(Date.now());
-                }
-              }}
-              className="rounded-lg bg-cyan-700 px-3 py-1.5 text-sm font-semibold text-white"
-            >
-              Start
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (!overallStartedAtMs) {
-                  return;
-                }
-                const delta = Math.max(0, Math.floor((Date.now() - overallStartedAtMs) / 1000));
-                setOverallBaseSeconds((current) => current + delta);
-                setOverallStartedAtMs(null);
-              }}
-              className="rounded-lg border border-cyan-700 px-3 py-1.5 text-sm font-semibold text-cyan-800"
-            >
-              Stop
-            </button>
+        <div className="mt-4 rounded-xl border border-cyan-200 bg-cyan-50 p-3 dark:border-cyan-900 dark:bg-cyan-950/30">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-cyan-950 dark:text-cyan-100">Session-Steuerung</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs font-semibold text-cyan-900 dark:text-cyan-200">
+                <input
+                  type="checkbox"
+                  checked={soundEnabled}
+                  onChange={(event) => setSoundEnabled(event.target.checked)}
+                  className="h-4 w-4"
+                />
+                🔊 Signale
+              </label>
+              {isIntervalCategory ? (
+                <label className="flex items-center gap-1.5 text-xs font-semibold text-cyan-900 dark:text-cyan-200">
+                  Vorlauf
+                  <input
+                    type="number"
+                    min={0}
+                    max={30}
+                    value={prepSecondsSetting}
+                    onChange={(event) =>
+                      setPrepSecondsSetting(
+                        Math.min(30, Math.max(0, Number.parseInt(event.target.value || "0", 10))),
+                      )
+                    }
+                    className="w-16 rounded-md border border-cyan-300 bg-white px-2 py-1 text-slate-900 dark:border-cyan-800 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </label>
+              ) : null}
+            </div>
+          </div>
+          <p className="mt-1 text-3xl font-black tabular-nums text-cyan-900 dark:text-cyan-100">
+            {formatSeconds(overallLiveSeconds)}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {isIntervalCategory ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void startIntervalSession();
+                  }}
+                  className="min-h-14 flex-1 touch-manipulation rounded-xl bg-cyan-700 px-4 text-base font-black text-white"
+                >
+                  ▶ {isHitWorkout ? "HIT Start" : `${flowLabel} Start`}
+                </button>
+                {intervalRunning ? (
+                  <button
+                    type="button"
+                    onClick={pauseIntervalSession}
+                    className="min-h-14 touch-manipulation rounded-xl border-2 border-cyan-700 px-4 text-base font-bold text-cyan-900 dark:text-cyan-200"
+                  >
+                    ⏸ Pause
+                  </button>
+                ) : null}
+                {intervalPhase !== "idle" && !showFocusOverlay ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowFocusOverlay(true)}
+                    className="min-h-14 touch-manipulation rounded-xl bg-slate-900 px-4 text-base font-bold text-white"
+                  >
+                    Vollbild
+                  </button>
+                ) : null}
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={startWorkoutSession}
+                  className="min-h-14 flex-1 touch-manipulation rounded-xl bg-cyan-700 px-4 text-base font-black text-white"
+                >
+                  ▶ Training Start
+                </button>
+                <button
+                  type="button"
+                  onClick={pauseWorkoutSession}
+                  className="min-h-14 touch-manipulation rounded-xl border-2 border-cyan-700 px-4 text-base font-bold text-cyan-900 dark:text-cyan-200"
+                >
+                  ⏸ Pause
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => {
                 setOverallBaseSeconds(0);
                 setOverallStartedAtMs(null);
               }}
-              className="rounded-lg border border-rose-600 px-3 py-1.5 text-sm font-semibold text-rose-700"
+              className="min-h-14 touch-manipulation rounded-xl border border-rose-500 px-4 text-sm font-semibold text-rose-700 dark:text-rose-300"
             >
               Reset
             </button>
           </div>
+          {isIntervalCategory ? (
+            <p className="mt-2 text-[11px] font-medium text-cyan-800 dark:text-cyan-300">
+              {isTabata
+                ? `Tabata: 20s Belastung / 10s Pause · ${tabataRounds} Runden`
+                : isHitWorkout
+                  ? `HIT: ${hitWorkSeconds}s Belastung / ${hitRestSeconds}s Pause · ${hitTargetRounds} Runden`
+                  : "Signale: sanfter Gong bei jedem Übungswechsel."}
+            </p>
+          ) : null}
         </div>
         ) : null}
 
         {pageViewTab === "training" && isFlowCategory ? (
           <div className="mt-4 rounded-xl border border-emerald-300 bg-emerald-50 p-3 dark:border-emerald-900 dark:bg-emerald-950/30">
             <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-semibold text-emerald-950">
+              <p className="text-sm font-semibold text-emerald-950 dark:text-emerald-100">
                 {flowLabel} Flow
               </p>
               <div className="flex gap-2">
                 {!morningFlowActive ? (
                   <button
                     type="button"
-                    onClick={startMorningFlow}
-                    className="rounded-lg bg-emerald-700 px-3 py-1.5 text-sm font-semibold text-white"
+                    onClick={() => {
+                      void startIntervalSession();
+                    }}
+                    className="min-h-12 rounded-xl bg-emerald-700 px-4 text-sm font-bold text-white"
                   >
                     ▶ Flow starten
                   </button>
                 ) : (
                   <button
                     type="button"
-                    onClick={() => {
-                      if (activeExerciseTimer) {
-                        pauseExerciseTimer(activeExerciseTimer.exercise);
-                      }
-                      setMorningFlowActive(false);
-                      setMinuteAlertedExercise(null);
-                      setStatusText(`${flowLabel} Flow pausiert.`);
-                    }}
-                    className="rounded-lg border border-emerald-700 px-3 py-1.5 text-sm font-semibold text-emerald-900"
+                    onClick={pauseIntervalSession}
+                    className="min-h-12 rounded-xl border-2 border-emerald-700 px-4 text-sm font-bold text-emerald-900 dark:text-emerald-200"
                   >
-                    ⏸ Flow stoppen
+                    ⏸ Flow pausieren
                   </button>
                 )}
               </div>
             </div>
 
             <div className="mt-2 flex flex-wrap items-center gap-3">
-              <label className="flex items-center gap-1.5 text-xs font-medium text-emerald-900">
+              <label className="flex items-center gap-1.5 text-xs font-medium text-emerald-900 dark:text-emerald-200">
                 <input
                   type="checkbox"
                   checked={halfwayAlertEnabled}
                   onChange={(e) => setHalfwayAlertEnabled(e.target.checked)}
-                  className="h-3.5 w-3.5"
+                  className="h-4 w-4"
                 />
                 Halbzeit-Signal
               </label>
+              {isTabata ? (
+                <label className="flex items-center gap-1.5 text-xs font-medium text-emerald-900 dark:text-emerald-200">
+                  Runden
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={tabataRounds}
+                    onChange={(event) =>
+                      setTabataRounds(Math.max(1, Number.parseInt(event.target.value || "1", 10)))
+                    }
+                    className="w-16 rounded-md border border-emerald-300 bg-white px-2 py-1 text-slate-900 dark:border-emerald-800 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </label>
+              ) : null}
             </div>
 
-            {completedExercises.length > 0 && (
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {completedExercises.map((ex) => (
-                  <span
-                    key={ex}
-                    className="rounded-full bg-emerald-200 px-2 py-0.5 text-[11px] font-semibold text-emerald-900"
-                  >
-                    ✓ {ex}
-                  </span>
-                ))}
-              </div>
-            )}
+            <div className="mt-3 grid gap-1.5 sm:grid-cols-2">
+              {flowExerciseStates.map((item, index) => (
+                <div
+                  key={`flow-step-${item.exercise}`}
+                  className={`rounded-lg border px-2.5 py-2 text-xs font-semibold transition-all ${
+                    item.done
+                      ? "border-emerald-400 bg-emerald-500 text-white"
+                      : item.active
+                        ? "border-cyan-500 bg-cyan-100 text-cyan-900"
+                        : "border-slate-300 bg-white text-slate-700"
+                  }`}
+                >
+                  {index + 1}. {item.done ? "✓ " : ""}{item.exercise}
+                </div>
+              ))}
+            </div>
 
             {activeHeroExercise ? (
               <div className="mt-3">
                 <div className="rounded-2xl border-2 border-emerald-400 bg-slate-50 p-4 shadow-md dark:bg-slate-900">
-                  <p className="text-center text-xl font-black text-emerald-900">
+                  <p className="text-center text-xl font-black text-emerald-900 dark:text-emerald-200">
                     {activeHeroExercise}
                   </p>
 
@@ -4848,23 +5426,23 @@ export function RoutineJournal({
                         />
                       </svg>
                       <div className="z-10 text-center">
-                        <p className="text-2xl font-black text-emerald-900">
+                        <p className="text-2xl font-black text-emerald-900 dark:text-emerald-200">
                           {formatSeconds(heroRemaining)}
                         </p>
-                        <p className="text-[10px] font-semibold text-emerald-700">verbleibend</p>
+                        <p className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">verbleibend</p>
                       </div>
                     </div>
                   </div>
 
-                  <p className="mt-2 text-center text-sm font-semibold text-cyan-800">
+                  <p className="mt-2 text-center text-sm font-semibold text-cyan-800 dark:text-cyan-300">
                     Getrackt: {formatSeconds(heroLiveSeconds)}
                   </p>
 
-                  <div className="mt-3 flex h-24 items-center justify-center rounded-xl bg-slate-100 text-xs font-medium text-slate-400">
+                  <div className="mt-3 flex h-24 items-center justify-center rounded-xl bg-slate-100 text-xs font-medium text-slate-400 dark:bg-slate-800">
                     Bild / GIF kommt noch
                   </div>
 
-                  <p className="mt-3 text-center text-xs italic text-emerald-700">
+                  <p className="mt-3 text-center text-xs italic text-emerald-700 dark:text-emerald-300">
                     {encouragementLine}
                   </p>
 
@@ -4900,7 +5478,7 @@ export function RoutineJournal({
                   </div>
 
                   <details className="mt-3">
-                    <summary className="cursor-pointer text-xs font-medium text-slate-500">
+                    <summary className="cursor-pointer text-xs font-medium text-slate-500 dark:text-slate-400">
                       ⚙ Zielzeit anpassen
                     </summary>
                     <div className="mt-2 flex items-center gap-2">
@@ -4916,98 +5494,42 @@ export function RoutineJournal({
                             [activeHeroExercise]: val,
                           }));
                         }}
-                        className="w-20 rounded-md border border-slate-400 px-2 py-1 text-sm text-slate-900"
+                        className="w-20 rounded-md border border-slate-400 px-2 py-1 text-sm text-slate-900 dark:text-slate-100 dark:border-slate-600"
                       />
-                      <span className="text-xs text-slate-600">Sekunden</span>
+                      <span className="text-xs text-slate-600 dark:text-slate-300">Sekunden</span>
                     </div>
                   </details>
                 </div>
 
                 {nextExerciseAfterHero && (
-                  <div className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 opacity-70">
-                    <p className="text-xs font-semibold text-emerald-700">Nächste Übung:</p>
-                    <p className="text-sm font-bold text-emerald-900">{nextExerciseAfterHero}</p>
+                  <div className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 opacity-70 dark:bg-emerald-950/40 dark:border-emerald-800">
+                    <p className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">Nächste Übung:</p>
+                    <p className="text-sm font-bold text-emerald-900 dark:text-emerald-200">{nextExerciseAfterHero}</p>
                   </div>
                 )}
               </div>
             ) : (
-              <p className="mt-3 text-sm text-emerald-700">
+              <p className="mt-3 text-sm text-emerald-700 dark:text-emerald-300">
                 Alle Übungen erledigt – super gemacht! 🎉
               </p>
             )}
-            {isMorningRoutine && showFlowCompletionPrompt ? (
-              <div className="mt-3 rounded-xl border border-emerald-300 bg-white p-3">
-                <p className="text-sm font-semibold text-emerald-900">
-                  Morning abgeschlossen - wie ging es dir heute?
-                </p>
-                <div className="mt-2">
-                  <p className="text-xs font-semibold text-slate-700">Score 0-10</p>
-                  <div className="mt-1 flex flex-wrap gap-1.5">
-                    {scoreChoices.map((score) => (
-                      <button
-                        key={`flow-score-${score}`}
-                        type="button"
-                        onClick={() =>
-                          setReflection((current) => ({ ...current, flowScore: String(score) }))
-                        }
-                        className={`rounded-full px-2.5 py-1 text-xs font-bold ${
-                          reflection.flowScore === String(score)
-                            ? "bg-emerald-600 text-white"
-                            : "border border-slate-300 bg-slate-50 text-slate-700"
-                        }`}
-                      >
-                        {score}
-                      </button>
-                    ))}
-                  </div>
-                  <label className="mt-2 flex flex-col gap-1 text-xs font-medium text-slate-900">
-                    Freitext
-                    <textarea
-                      rows={2}
-                      value={reflection.text}
-                      onChange={(event) =>
-                        setReflection((current) => ({ ...current, text: event.target.value }))
-                      }
-                      placeholder="Kurzer Check-in ..."
-                      className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
-                    />
-                  </label>
-                </div>
-                <div className="mt-2 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={submitFlowCompletion}
-                    className="rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white"
-                  >
-                    Check-in speichern
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowFlowCompletionPrompt(false)}
-                    className="rounded-lg border border-emerald-700 px-3 py-1.5 text-xs font-semibold text-emerald-900"
-                  >
-                    Später
-                  </button>
-                </div>
-              </div>
-            ) : null}
           </div>
         ) : null}
 
         {pageViewTab === "training" ? (
-        <div className="mt-4 rounded-xl border border-slate-300 bg-slate-50 p-3">
+        <div className="mt-4 rounded-xl border border-slate-300 bg-slate-50 p-3 dark:bg-slate-900 dark:border-slate-700">
           <div className="flex items-center justify-between gap-2">
-            <p className="text-sm font-semibold text-slate-900">Tages-Check-in</p>
+            <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Tages-Check-in</p>
             <button
               type="button"
               onClick={() => setShowJournalArchive((v) => !v)}
-              className="rounded-lg border border-slate-400 px-2 py-1 text-xs font-semibold text-slate-700"
+              className="rounded-lg border border-slate-400 px-2 py-1 text-xs font-semibold text-slate-700 dark:text-slate-200 dark:border-slate-600"
             >
               📖 Archiv {showJournalArchive ? "ausblenden" : "anzeigen"}
             </button>
           </div>
           <div className="mt-2">
-            <p className="text-xs font-semibold text-slate-700">
+            <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
               Score (0 = letzter Kraftakt, 10 = super gut)
             </p>
             <div className="mt-1 flex flex-wrap gap-1.5">
@@ -5036,7 +5558,7 @@ export function RoutineJournal({
               }
               rows={3}
               placeholder="Freitext: Wie war dein Tag/Flow?"
-              className="w-full rounded-md border border-slate-400 px-2 py-2 pr-8 text-sm text-slate-900"
+              className="w-full rounded-md border border-slate-400 px-2 py-2 pr-8 text-sm text-slate-900 dark:text-slate-100 dark:border-slate-600"
             />
             {reflection.text ? (
               <button
@@ -5051,12 +5573,12 @@ export function RoutineJournal({
           </div>
 
           {showJournalArchive && (
-            <div className="mt-3 max-h-80 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2">
-              <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-600">
+            <div className="mt-3 max-h-80 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2 dark:bg-slate-900 dark:border-slate-700">
+              <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-600 dark:text-slate-300">
                 Archiv ({journalArchive.length} Einträge)
               </p>
               {journalArchive.length === 0 ? (
-                <p className="text-xs text-slate-500">Noch keine archivierten Einträge.</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">Noch keine archivierten Einträge.</p>
               ) : (
                 [...journalArchive]
                   .sort((a, b) => b.dateKey.localeCompare(a.dateKey))
@@ -5066,14 +5588,14 @@ export function RoutineJournal({
                     return (
                       <div
                         key={archiveKey}
-                        className="mb-2 rounded-md border border-slate-200 p-2 text-xs"
+                        className="mb-2 rounded-md border border-slate-200 p-2 text-xs dark:border-slate-700"
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className="font-bold text-slate-800">{entry.dateKey}</span>
-                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
+                          <span className="font-bold text-slate-800 dark:text-slate-100">{entry.dateKey}</span>
+                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600 dark:text-slate-300 dark:bg-slate-800">
                             {entry.category}
                           </span>
-                          <span className="text-slate-600">{entry.mood}</span>
+                          <span className="text-slate-600 dark:text-slate-300">{entry.mood}</span>
                         </div>
                         <p className={`mt-1 text-slate-700 ${expanded ? "" : "line-clamp-3"}`}>
                           {entry.text}
@@ -5107,14 +5629,14 @@ export function RoutineJournal({
         ) : null}
 
         {pageViewTab === "builder" ? (
-        <div className="mt-4 rounded-xl border border-slate-300 bg-slate-50 p-3">
-          <p className="text-sm font-semibold text-slate-900">Übungen verwalten</p>
+        <div className="mt-4 rounded-xl border border-slate-300 bg-slate-50 p-3 dark:bg-slate-900 dark:border-slate-700">
+          <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Übungen verwalten</p>
           <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
             <input
               value={newExerciseName}
               onChange={(event) => setNewExerciseName(event.target.value)}
               placeholder="Neue Übung hinzufügen"
-              className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900"
+              className="rounded-md border border-slate-400 px-2 py-2 text-sm text-slate-900 dark:text-slate-100 dark:border-slate-600"
             />
             <button
               type="button"
@@ -5128,7 +5650,7 @@ export function RoutineJournal({
             <select
               value={quickAddExercise}
               onChange={(event) => setQuickAddExercise(event.target.value)}
-              className="rounded-md border border-slate-400 bg-white px-2 py-2 text-sm text-slate-900"
+              className="rounded-md border border-slate-400 bg-white px-2 py-2 text-sm text-slate-900 dark:text-slate-100 dark:bg-slate-900 dark:border-slate-600"
             >
               <option value="">Übung aus Katalog wählen</option>
               {globalExerciseOptions.map((exercise) => (
@@ -5140,7 +5662,7 @@ export function RoutineJournal({
             <button
               type="button"
               onClick={() => addCustomExercise(quickAddExercise)}
-              className="rounded-lg border border-slate-500 px-3 py-2 text-sm font-semibold text-slate-800"
+              className="rounded-lg border border-slate-500 px-3 py-2 text-sm font-semibold text-slate-800 dark:text-slate-100"
             >
               Übernehmen
             </button>
@@ -5152,9 +5674,9 @@ export function RoutineJournal({
               return (
                 <div
                   key={exercise}
-                  className="flex items-center justify-between rounded-md border border-slate-300 bg-white px-2 py-2"
+                  className="flex items-center justify-between rounded-md border border-slate-300 bg-white px-2 py-2 dark:bg-slate-900 dark:border-slate-700"
                 >
-                  <label className="flex items-center gap-2 text-sm font-medium text-slate-900">
+                  <label className="flex items-center gap-2 text-sm font-medium text-slate-900 dark:text-slate-100">
                     <input
                       type="checkbox"
                       checked={!hidden}
@@ -5166,7 +5688,7 @@ export function RoutineJournal({
                     <button
                       type="button"
                       onClick={() => removeCustomExercise(exercise)}
-                      className="text-xs font-semibold text-rose-700"
+                      className="text-xs font-semibold text-rose-700 dark:text-rose-300"
                     >
                       Entfernen
                     </button>
@@ -5183,22 +5705,22 @@ export function RoutineJournal({
           <button
             type="button"
             onClick={() => setShowExerciseLibrary((v) => !v)}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700 dark:text-slate-200 dark:bg-slate-800 dark:border-slate-700"
           >
             📋 Übungsübersicht {showExerciseLibrary ? "▲" : "▼"}
           </button>
           {showExerciseLibrary && (
-            <div className="mt-2 rounded-xl border border-slate-300 bg-slate-50 p-3">
-              <p className="text-sm font-semibold text-slate-900">Übungsübersicht (alle Kategorien)</p>
+            <div className="mt-2 rounded-xl border border-slate-300 bg-slate-50 p-3 dark:bg-slate-900 dark:border-slate-700">
+              <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Übungsübersicht (alle Kategorien)</p>
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
                 {categories.map((category) => {
                   const customForCategory = customExercisesByCategory[category.name] ?? [];
                   const all = Array.from(new Set([...category.exercises, ...customForCategory]));
                   return (
-                    <article key={category.name} className="rounded-md border border-slate-300 bg-white p-2">
-                      <h3 className="text-sm font-bold text-slate-900">{category.name}</h3>
-                      <p className="mt-1 text-xs text-slate-700">{all.length} Übungen</p>
-                      <ul className="mt-2 list-disc pl-4 text-xs text-slate-800">
+                    <article key={category.name} className="rounded-md border border-slate-300 bg-white p-2 dark:bg-slate-900 dark:border-slate-700">
+                      <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">{category.name}</h3>
+                      <p className="mt-1 text-xs text-slate-700 dark:text-slate-200">{all.length} Übungen</p>
+                      <ul className="mt-2 list-disc pl-4 text-xs text-slate-800 dark:text-slate-100">
                         {all.map((exercise) => (
                           <li key={`${category.name}-${exercise}`}>{exercise}</li>
                         ))}
@@ -5214,7 +5736,7 @@ export function RoutineJournal({
 
         <div className="mt-4 hidden grid gap-3">
           {loadingEntries ? (
-            <p className="text-sm font-medium text-slate-700">Lade Cloud-Daten ...</p>
+            <p className="text-sm font-medium text-slate-700 dark:text-slate-200">Lade Cloud-Daten ...</p>
           ) : isFlowCategory ? null : (
             <>
               {isBodybuilding ? (
@@ -5227,7 +5749,7 @@ export function RoutineJournal({
                     Fokus starten
                   </button>
                   {bodybuildingFocusExercise ? (
-                    <span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-semibold text-indigo-900">
+                    <span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-semibold text-indigo-900 dark:text-indigo-200 dark:bg-indigo-900/40">
                       Fokus: {bodybuildingFocusExercise}
                     </span>
                   ) : null}
@@ -5275,7 +5797,7 @@ export function RoutineJournal({
                           }
                           className="mt-1 h-5 w-5 accent-indigo-700"
                         />
-                        <span className="text-sm font-semibold text-slate-900">{entry.exercise}</span>
+                        <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">{entry.exercise}</span>
                       </label>
                       {isBodybuilding ? (
                         <button
@@ -5288,8 +5810,8 @@ export function RoutineJournal({
                       ) : null}
                     </div>
 
-                    <div className="mt-3 rounded-md bg-cyan-50 px-2 py-2">
-                      <p className="text-xs font-semibold text-cyan-900">
+                    <div className="mt-3 rounded-md bg-cyan-50 px-2 py-2 dark:bg-cyan-950/40">
+                      <p className="text-xs font-semibold text-cyan-900 dark:text-cyan-200">
                         Getrackte Zeit: {formatSeconds(liveTrackedSeconds)}
                       </p>
                       <div className="mt-1 flex flex-wrap gap-2">
@@ -5303,7 +5825,7 @@ export function RoutineJournal({
                         <button
                           type="button"
                           onClick={() => pauseExerciseTimer(entry.exercise)}
-                          className="rounded-md border border-cyan-700 px-2 py-1 text-xs font-semibold text-cyan-900"
+                          className="rounded-md border border-cyan-700 px-2 py-1 text-xs font-semibold text-cyan-900 dark:text-cyan-200"
                         >
                           Stop
                         </button>
@@ -5313,7 +5835,7 @@ export function RoutineJournal({
                     <div className="mt-3 grid gap-2 sm:grid-cols-3">
                       {isBodybuilding ? (
                         <>
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                             Wiederholungen pro Satz
                             <input
                               type="number"
@@ -5322,10 +5844,10 @@ export function RoutineJournal({
                               onChange={(event) =>
                                 handleEntryChange(entry.exercise, { reps: event.target.value })
                               }
-                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                             />
                           </label>
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                             Gewicht ({weightUnitLabel})
                             <input
                               type="number"
@@ -5335,10 +5857,10 @@ export function RoutineJournal({
                               onChange={(event) =>
                                 handleEntryChange(entry.exercise, { weightKg: event.target.value })
                               }
-                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                             />
                           </label>
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                             Sätze pro Übung
                             <input
                               type="number"
@@ -5347,10 +5869,10 @@ export function RoutineJournal({
                               onChange={(event) =>
                                 handleSetCountChange(entry.exercise, event.target.value)
                               }
-                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                             />
                           </label>
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 sm:col-span-3">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 sm:col-span-3 dark:text-slate-100">
                             Notiz
                             <textarea
                               value={entry.notes}
@@ -5358,13 +5880,13 @@ export function RoutineJournal({
                                 handleEntryChange(entry.exercise, { notes: event.target.value })
                               }
                               rows={2}
-                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                             />
                           </label>
                         </>
                       ) : (
                         <>
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                             Zielzeit in Minuten (optional)
                             <input
                               type="number"
@@ -5373,10 +5895,10 @@ export function RoutineJournal({
                               onChange={(event) =>
                                 handleEntryChange(entry.exercise, { targetMinutes: event.target.value })
                               }
-                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                             />
                           </label>
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                             Wiederholungen (optional)
                             <input
                               type="number"
@@ -5385,10 +5907,10 @@ export function RoutineJournal({
                               onChange={(event) =>
                                 handleEntryChange(entry.exercise, { reps: event.target.value })
                               }
-                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                             />
                           </label>
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                             Sätze (optional)
                             <input
                               type="number"
@@ -5397,10 +5919,10 @@ export function RoutineJournal({
                               onChange={(event) =>
                                 handleSetCountChange(entry.exercise, event.target.value)
                               }
-                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                             />
                           </label>
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
                             Dauer in Minuten (optional)
                             <input
                               type="number"
@@ -5411,10 +5933,10 @@ export function RoutineJournal({
                                   durationMinutes: event.target.value,
                                 })
                               }
-                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                             />
                           </label>
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 sm:col-span-3">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 sm:col-span-3 dark:text-slate-100">
                             Notiz (optional)
                             <textarea
                               value={entry.notes}
@@ -5422,24 +5944,24 @@ export function RoutineJournal({
                                 handleEntryChange(entry.exercise, { notes: event.target.value })
                               }
                               rows={2}
-                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900"
+                              className="rounded-md border border-slate-400 px-2 py-1.5 text-slate-900 dark:text-slate-100 dark:border-slate-600"
                             />
                           </label>
                         </>
                       )}
                     </div>
                     {isBodybuilding && Number.parseInt(entry.sets || "0", 10) > 0 ? (
-                      <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-2">
-                        <p className="text-xs font-semibold text-emerald-900">
+                      <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-2 dark:bg-emerald-950/40 dark:border-emerald-800">
+                        <p className="text-xs font-semibold text-emerald-900 dark:text-emerald-200">
                           Satz-Tracker: {entry.completedSets} / {entry.sets}
                         </p>
                         <div className="mt-2 space-y-2">
                           {entry.setLogs.map((setLog, setIndex) => (
                             <div
                               key={`${entry.exercise}-set-legacy-${setIndex + 1}`}
-                              className="grid gap-2 rounded-md border border-emerald-200 bg-white p-2 sm:grid-cols-[64px_1fr_1fr_auto]"
+                              className="grid gap-2 rounded-md border border-emerald-200 bg-white p-2 sm:grid-cols-[64px_1fr_1fr_auto] dark:bg-slate-900 dark:border-emerald-800"
                             >
-                              <span className="self-center text-xs font-semibold text-emerald-900">
+                              <span className="self-center text-xs font-semibold text-emerald-900 dark:text-emerald-200">
                                 Satz {setIndex + 1}
                               </span>
                               <input
@@ -5450,7 +5972,7 @@ export function RoutineJournal({
                                   updateSetLogValue(entry.exercise, setIndex, "reps", event.target.value)
                                 }
                                 placeholder="Reps"
-                                className="rounded-md border border-slate-400 px-2 py-1 text-xs text-slate-900"
+                                className="rounded-md border border-slate-400 px-2 py-1 text-xs text-slate-900 dark:text-slate-100 dark:border-slate-600"
                               />
                               <input
                                 type="number"
@@ -5466,9 +5988,9 @@ export function RoutineJournal({
                                   )
                                 }
                                 placeholder={`Gewicht ${weightUnitLabel}`}
-                                className="rounded-md border border-slate-400 px-2 py-1 text-xs text-slate-900"
+                                className="rounded-md border border-slate-400 px-2 py-1 text-xs text-slate-900 dark:text-slate-100 dark:border-slate-600"
                               />
-                              <label className="flex items-center gap-1 self-center text-xs font-semibold text-emerald-900">
+                              <label className="flex items-center gap-1 self-center text-xs font-semibold text-emerald-900 dark:text-emerald-200">
                                 <input
                                   type="checkbox"
                                   checked={setLog.done}
@@ -5514,14 +6036,14 @@ export function RoutineJournal({
               <button
                 type="button"
                 onClick={triggerOfflineImport}
-                className="touch-manipulation rounded-lg border border-indigo-600 px-4 py-2.5 text-sm font-semibold text-indigo-800"
+                className="touch-manipulation rounded-lg border border-indigo-600 px-4 py-2.5 text-sm font-semibold text-indigo-800 dark:text-indigo-300"
               >
                 Offline laden
               </button>
               <button
                 type="button"
                 onClick={exportOfflineData}
-                className="touch-manipulation rounded-lg border border-slate-400 px-4 py-2.5 text-sm font-semibold text-slate-700"
+                className="touch-manipulation rounded-lg border border-slate-400 px-4 py-2.5 text-sm font-semibold text-slate-700 dark:text-slate-200 dark:border-slate-600"
               >
                 Datei exportieren
               </button>
@@ -5540,8 +6062,8 @@ export function RoutineJournal({
         </>
         ) : null}
 
-        {statusText ? <p className="mt-3 text-sm font-semibold text-emerald-800 dark:text-emerald-300">{statusText}</p> : null}
-        {errorText ? <p className="mt-2 text-sm font-semibold text-rose-800 dark:text-rose-300">{errorText}</p> : null}
+        {statusText ? <p className="mt-3 text-sm font-semibold text-emerald-800 dark:text-emerald-300" role="status" aria-live="polite">{statusText}</p> : null}
+        {errorText ? <p className="mt-2 text-sm font-semibold text-rose-800 dark:text-rose-300" role="alert">{errorText}</p> : null}
       </div>
 
       {pageViewTab === "training" && !isFlowCategory && currentWorkoutEntry ? (
@@ -5549,37 +6071,48 @@ export function RoutineJournal({
           <p className="px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-300">
             Quick Logging
           </p>
-          <p className="px-1 text-xs font-semibold text-slate-900 dark:text-slate-100">{currentWorkoutEntry.exercise}</p>
-          <div className="mt-2 grid grid-cols-3 gap-2.5">
+          <div className="mt-2 rounded-lg border border-indigo-300 bg-indigo-700 px-3 py-2 text-base font-black text-white dark:border-indigo-800">
+            {currentWorkoutEntry.exercise}
+          </div>
+          {restTimerRemaining > 0 ? (
+            <div className="mt-2 flex items-center justify-between rounded-lg bg-blue-700 px-3 py-2 text-white">
+              <span className="text-xs font-bold uppercase tracking-wide">Satzpause</span>
+              <span className="text-xl font-black tabular-nums">{formatSeconds(restTimerRemaining)}</span>
+              <button
+                type="button"
+                onClick={() => setRestTimerEndsAtMs(null)}
+                className="min-h-9 rounded-md bg-white/20 px-2 text-xs font-bold"
+              >
+                Skip
+              </button>
+            </div>
+          ) : null}
+          {isHitWorkout ? (
+            <p className="mt-2 px-1 text-[11px] font-semibold text-fuchsia-800 dark:text-fuchsia-300">
+              HIT benötigt pro Übung Reps &gt; 0 vor Done & Next.
+            </p>
+          ) : null}
+          <div className="mt-2 grid grid-cols-2 gap-2.5">
             <button
               type="button"
               onClick={runStickyDoneNext}
-              className="touch-manipulation col-span-2 min-h-11 rounded-lg bg-emerald-600 px-3 py-2.5 text-sm font-bold text-white"
+              className="touch-manipulation min-h-11 rounded-lg bg-emerald-600 px-3 py-2.5 text-sm font-bold text-white"
             >
               ✓ Done & Next
             </button>
             <button
               type="button"
-              onClick={() =>
-                handleCompletedToggle(currentWorkoutEntry.exercise, !currentWorkoutEntry.completed)
-              }
-              className="touch-manipulation min-h-11 rounded-lg border border-slate-400 px-3 py-2.5 text-xs font-semibold text-slate-700 dark:border-slate-600 dark:text-slate-200"
-            >
-              {currentWorkoutEntry.completed ? "Undo" : "Done"}
-            </button>
-            <button
-              type="button"
-              onClick={() => startExerciseTimer(currentWorkoutEntry.exercise)}
+              onClick={startWorkoutSession}
               className="touch-manipulation min-h-11 rounded-lg bg-cyan-700 px-3 py-2.5 text-xs font-semibold text-white"
             >
-              Timer Start
+              {isHitWorkout ? "HIT Start" : "Start"}
             </button>
             <button
               type="button"
-              onClick={() => pauseExerciseTimer(currentWorkoutEntry.exercise)}
+              onClick={pauseWorkoutSession}
               className="touch-manipulation min-h-11 rounded-lg border border-cyan-700 px-3 py-2.5 text-xs font-semibold text-cyan-900 dark:text-cyan-300"
             >
-              Timer Stop
+              Pause
             </button>
             <button
               type="button"
@@ -5593,6 +6126,113 @@ export function RoutineJournal({
               className="touch-manipulation min-h-11 rounded-lg border border-indigo-500 px-3 py-2.5 text-xs font-semibold text-indigo-800 dark:text-indigo-300"
             >
               {activeTab === "cloud" ? "Cloud Save" : "Offline Save"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {isIntervalCategory && intervalPhase !== "idle" && showFocusOverlay ? (
+        <div
+          className={`fixed inset-0 z-50 flex flex-col text-white ${phaseTheme.surface}`}
+          style={{ transition: reducedMotion ? "none" : "background-color 80ms ease-in" }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Aktive Trainingssession"
+        >
+          <div className="flex items-center justify-between px-5 pt-[calc(1rem+env(safe-area-inset-top))]">
+            <span className="text-sm font-bold uppercase tracking-[0.18em] text-white/90">
+              {isHitWorkout ? "HIT" : flowLabel}
+              {intervalSettings.totalRounds > 1
+                ? ` · Runde ${phaseRound} / ${intervalSettings.totalRounds}`
+                : ""}
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowFocusOverlay(false)}
+              className="min-h-11 min-w-11 rounded-full bg-black/25 px-4 text-sm font-bold text-white"
+              aria-label="Vollbild verlassen"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="flex flex-1 flex-col items-center justify-center px-5 text-center">
+            <p
+              className="text-sm font-black uppercase tracking-[0.3em] text-white/85"
+              aria-live="polite"
+            >
+              {phaseTheme.label}
+            </p>
+
+            <h2 className="mt-3 text-[clamp(24px,7vw,40px)] font-black leading-tight text-white">
+              {intervalPhase === "rest" ? `Als Nächstes: ${phaseExercise ?? "-"}` : phaseExercise ?? "-"}
+            </h2>
+
+            <div className="relative mt-6 flex h-[min(62vw,300px)] w-[min(62vw,300px)] items-center justify-center">
+              <svg className="absolute inset-0 -rotate-90" viewBox="0 0 120 120" aria-hidden="true">
+                <circle cx="60" cy="60" r="54" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="7" />
+                <circle
+                  cx="60"
+                  cy="60"
+                  r="54"
+                  fill="none"
+                  stroke={phaseTheme.ring}
+                  strokeWidth="7"
+                  strokeLinecap="round"
+                  strokeDasharray={2 * Math.PI * 54}
+                  strokeDashoffset={2 * Math.PI * 54 * (1 - phaseProgress)}
+                  style={{ transition: reducedMotion ? "none" : "stroke-dashoffset 0.2s linear" }}
+                />
+              </svg>
+              <span
+                className="z-10 font-black tabular-nums text-white"
+                style={{
+                  fontSize: "clamp(72px, 22vw, 128px)",
+                  letterSpacing: "-0.02em",
+                  lineHeight: 1,
+                }}
+              >
+                {phaseRemainingSeconds}
+              </span>
+            </div>
+
+            {intervalPhase !== "rest" && phaseUpcomingExercise ? (
+              <p className="mt-6 rounded-full bg-black/25 px-4 py-2 text-sm font-semibold text-white">
+                Next: {phaseUpcomingExercise}
+              </p>
+            ) : null}
+
+            {intervalPhase === "complete" ? (
+              <p className="mt-6 text-lg font-bold text-white">Session abgeschlossen 🎉</p>
+            ) : null}
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 px-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))]">
+            <button
+              type="button"
+              onClick={pauseIntervalSession}
+              disabled={intervalPhase === "complete"}
+              className="min-h-16 rounded-2xl bg-black/30 text-base font-bold text-white disabled:opacity-40"
+            >
+              Pause
+            </button>
+            <button
+              type="button"
+              onClick={skipIntervalPhase}
+              disabled={intervalPhase === "complete"}
+              className="min-h-16 rounded-2xl bg-white text-base font-black text-slate-900 disabled:opacity-40 dark:text-slate-100 dark:bg-slate-900"
+            >
+              {intervalPhase === "rest" ? "Weiter" : "Done"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                exitIntervalSession();
+                setShowFocusOverlay(false);
+              }}
+              className="min-h-16 rounded-2xl bg-black/30 text-base font-bold text-white"
+            >
+              Ende
             </button>
           </div>
         </div>
