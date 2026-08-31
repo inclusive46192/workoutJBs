@@ -1,9 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import Link from "next/link";
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { Session } from "@supabase/supabase-js";
 import { exerciseMuscleGroupMap, type JournalCategory } from "@/lib/exercises";
 import { getCategoryProfile } from "@/lib/category-profiles";
 import { isSetKind, setKinds, type SetKind } from "@/lib/set-types";
@@ -26,7 +24,6 @@ import {
   type Goal,
   type GoalType,
 } from "@/lib/goals";
-import { getSupabaseClient } from "@/lib/supabase";
 import { useWakeLock } from "@/hooks/use-wake-lock";
 import {
   cancelScheduledCues,
@@ -41,14 +38,10 @@ import {
 } from "@/lib/workout-audio";
 
 type RoutineJournalProps = {
-  initialTab: "cloud" | "lite";
   categories: JournalCategory[];
-  showLiteLink?: boolean;
-  showOfflineCopyButton?: boolean;
   hiddenLiteHero?: boolean;
 };
 
-type JournalTab = "cloud" | "lite";
 type PageViewTab = "training" | "builder" | "dashboard";
 
 type SetLog = {
@@ -70,20 +63,6 @@ type EntryState = {
   targetMinutes: string;
   trackedSeconds: number;
   notes: string;
-};
-
-type CloudRow = {
-  exercise: string;
-  completed: boolean;
-  sets?: number | null;
-  completed_sets?: number | null;
-  set_logs?: Array<{ reps?: string; weightKg?: string; done?: boolean; kind?: string }> | null;
-  reps: number | null;
-  weight_kg?: number | null;
-  duration_minutes: number | null;
-  target_minutes?: number | null;
-  tracked_seconds?: number | null;
-  notes: string | null;
 };
 
 type ReflectionState = {
@@ -278,17 +257,6 @@ function formatDurationCompact(totalSeconds: number): string {
   return `${minutes}m`;
 }
 
-function parsePositiveInt(value: string): number | null {
-  if (!value.trim()) {
-    return null;
-  }
-  const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed) || parsed < 0) {
-    return null;
-  }
-  return parsed;
-}
-
 function localStorageKey(dateKey: string, category: string): string {
   return `momentum-lite:${dateKey}:${category}`;
 }
@@ -348,26 +316,6 @@ function normalizeReflection(raw?: Partial<ReflectionState> | null): ReflectionS
     flowScore: raw?.flowScore ?? "",
     flowJournal: raw?.flowJournal ?? "",
   };
-}
-
-function toEntryMap(rows: CloudRow[], exercises: string[]): EntryState[] {
-  const byExercise = new Map(rows.map((row) => [row.exercise, row]));
-  return exercises.map((exercise) => {
-    const row = byExercise.get(exercise);
-    return {
-      exercise,
-      completed: row?.completed ?? false,
-      sets: row?.sets?.toString() ?? "",
-      completedSets: row?.completed_sets ?? 0,
-      setLogs: normalizeSetLogs(row?.set_logs, row?.sets?.toString() ?? ""),
-      reps: row?.reps?.toString() ?? "",
-      weightKg: row?.weight_kg?.toString() ?? "",
-      durationMinutes: row?.duration_minutes?.toString() ?? "",
-      targetMinutes: row?.target_minutes?.toString() ?? "",
-      trackedSeconds: row?.tracked_seconds ?? 0,
-      notes: row?.notes ?? "",
-    };
-  });
 }
 
 function normalizeEntries(entries: Partial<EntryState>[], exercises: string[]): EntryState[] {
@@ -489,17 +437,7 @@ function resolveExerciseMuscleGroup(exercise: string): BuilderMuscleGroup {
   return "Mobility";
 }
 
-export function RoutineJournal({
-  initialTab,
-  categories,
-  showLiteLink = false,
-  showOfflineCopyButton = false,
-  hiddenLiteHero = false,
-}: RoutineJournalProps) {
-  const supabase = useMemo(() => getSupabaseClient(), []);
-  const supabaseReady = Boolean(supabase);
-
-  const [activeTab, setActiveTab] = useState<JournalTab>(initialTab);
+export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJournalProps) {
   const [pageViewTab, setPageViewTab] = useState<PageViewTab>("training");
   const [showProfilePanel, setShowProfilePanel] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState(categories[0]?.name ?? "");
@@ -611,11 +549,6 @@ export function RoutineJournal({
   const [goalManualDraft, setGoalManualDraft] = useState<Record<string, string>>({});
   const cancelCuesRef = useRef<() => void>(() => {});
 
-  const [session, setSession] = useState<Session | null>(null);
-  const [authEmail, setAuthEmail] = useState("");
-  const [authBusy, setAuthBusy] = useState(false);
-  const [loadingEntries, setLoadingEntries] = useState(false);
-
   const [exerciseCustomSeconds, setExerciseCustomSeconds] = useState<ExerciseSecondMap>({});
   const [halfwayAlertEnabled, setHalfwayAlertEnabled] = useState(false);
   const [showJournalArchive, setShowJournalArchive] = useState(false);
@@ -644,10 +577,6 @@ export function RoutineJournal({
     Record<string, LastQuickLoad>
   >({});
   const [draggingExercise, setDraggingExercise] = useState<string | null>(null);
-  const [profileCloudStatus, setProfileCloudStatus] = useState<
-    "idle" | "synced" | "missing" | "unavailable"
-  >("idle");
-  const [profileLastSyncAt, setProfileLastSyncAt] = useState<string | null>(null);
   const offlineImportRef = useRef<HTMLInputElement | null>(null);
 
   const defaultWorkoutBuilderTemplates = useMemo<Record<string, WorkoutBuilderTemplate[]>>(() => {
@@ -956,14 +885,6 @@ export function RoutineJournal({
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nowMs, restTimerEndsAtMs]);
-
-  useEffect(() => {
-    if (activeTab !== "cloud" || !supabase || !session?.user.id) {
-      return;
-    }
-    void saveProfileToCloud(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, profile, session?.user.id, supabase]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1432,157 +1353,6 @@ export function RoutineJournal({
     (overallStartedAtMs ? Math.floor((nowMs - overallStartedAtMs) / 1000) : 0);
 
   useEffect(() => {
-    if (activeTab !== "cloud") {
-      return;
-    }
-
-    if (!supabase) {
-      return;
-    }
-
-    void supabase.auth.getSession().then(({ data, error }) => {
-      if (error) {
-        setErrorText(error.message);
-        return;
-      }
-      setSession(data.session);
-    });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, authSession) => {
-      setSession(authSession);
-      setErrorText("");
-    });
-
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, [activeTab, supabase]);
-
-  useEffect(() => {
-    if (activeTab !== "cloud" || !session?.user.id || !supabase) {
-      return;
-    }
-
-    let disposed = false;
-    const loadCloud = async () => {
-      setLoadingEntries(true);
-      setErrorText("");
-
-      const selectWithTimers = await supabase
-        .from("daily_entries")
-        .select(
-          "exercise,completed,sets,completed_sets,set_logs,reps,weight_kg,duration_minutes,target_minutes,tracked_seconds,notes",
-        )
-        .eq("user_id", session.user.id)
-        .eq("entry_date", selectedDate)
-        .eq("category", selectedCategory);
-
-      let rows: CloudRow[] = [];
-      let error = selectWithTimers.error;
-
-      if (
-        error?.message.includes("sets") ||
-        error?.message.includes("completed_sets") ||
-        error?.message.includes("set_logs") ||
-        error?.message.includes("weight_kg") ||
-        error?.message.includes("target_minutes") ||
-        error?.message.includes("tracked_seconds")
-      ) {
-        const fallback = await supabase
-          .from("daily_entries")
-          .select("exercise,completed,reps,duration_minutes,notes")
-          .eq("user_id", session.user.id)
-          .eq("entry_date", selectedDate)
-          .eq("category", selectedCategory);
-        error = fallback.error;
-        rows = (fallback.data ?? []) as CloudRow[];
-      } else {
-        rows = (selectWithTimers.data ?? []) as CloudRow[];
-      }
-
-      if (disposed) {
-        return;
-      }
-      if (error) {
-        setErrorText(error.message);
-        setLoadingEntries(false);
-        return;
-      }
-
-      setEntries(toEntryMap(rows, activeExercises));
-      setLoadingEntries(false);
-
-      let reflectionResult = await supabase
-        .from("daily_reflections")
-        .select("mood,reflection,overall_seconds,flow_score,flow_note")
-        .eq("user_id", session.user.id)
-        .eq("entry_date", selectedDate)
-        .eq("category", selectedCategory)
-        .maybeSingle();
-
-      if (
-        reflectionResult.error?.message.includes("flow_score") ||
-        reflectionResult.error?.message.includes("flow_note")
-      ) {
-        reflectionResult = await supabase
-          .from("daily_reflections")
-          .select("mood,reflection,overall_seconds")
-          .eq("user_id", session.user.id)
-          .eq("entry_date", selectedDate)
-          .eq("category", selectedCategory)
-          .maybeSingle();
-      }
-
-      if (disposed) {
-        return;
-      }
-
-      if (
-        reflectionResult.error &&
-        !reflectionResult.error.message.includes("relation \"daily_reflections\" does not exist")
-      ) {
-        setErrorText(reflectionResult.error.message);
-        return;
-      }
-
-      setReflection(
-        normalizeReflection({
-          mood: reflectionResult.data?.mood ?? "",
-          text: reflectionResult.data?.reflection ?? "",
-          flowScore:
-            reflectionResult.data?.flow_score === null ||
-            reflectionResult.data?.flow_score === undefined
-              ? ""
-              : String(reflectionResult.data.flow_score),
-          flowJournal: reflectionResult.data?.flow_note ?? "",
-        }),
-      );
-      setOverallBaseSeconds(reflectionResult.data?.overall_seconds ?? 0);
-    };
-
-    void loadCloud();
-
-    return () => {
-      disposed = true;
-    };
-  }, [activeExercises, activeTab, selectedCategory, selectedDate, session?.user.id, supabase]);
-
-  useEffect(() => {
-    if (activeTab !== "cloud" || !session?.user.id || !supabase) {
-      return;
-    }
-
-    void loadProfileFromCloud(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, session?.user.id, supabase]);
-
-  useEffect(() => {
-    if (activeTab !== "lite") {
-      return;
-    }
-
     const loadLite = async () => {
       const key = localStorageKey(selectedDate, selectedCategory);
       const raw = localStorage.getItem(key);
@@ -1618,7 +1388,7 @@ export function RoutineJournal({
     void loadLite();
     // Deliberately not keyed on activeExercises: loading a routine changes the
     // active list and must not wipe the entries that routine just supplied.
-  }, [activeTab, selectedCategory, selectedDate]);
+  }, [selectedCategory, selectedDate]);
 
   // Newly activated exercises get a default entry without touching existing logs.
   useEffect(() => {
@@ -2669,170 +2439,10 @@ export function RoutineJournal({
     }
   };
 
-  const loadProfileFromCloud = async (showStatus: boolean) => {
-    if (!supabase || !session?.user.id) {
-      setProfileCloudStatus("unavailable");
-      return;
-    }
-
-    const profileResult = await supabase
-      .from("user_profiles")
-      .select("display_name,goal,preferred_categories,weight_unit,reminder_time")
-      .eq("user_id", session.user.id)
-      .maybeSingle();
-
-    if (profileResult.error?.message.includes("relation \"user_profiles\" does not exist")) {
-      setProfileCloudStatus("unavailable");
-      if (showStatus) {
-        setStatusText("Cloud-Profil Tabelle fehlt. Bitte schema.sql in Supabase ausführen.");
-      }
-      return;
-    }
-
-    if (
-      profileResult.error &&
-      !profileResult.error.message.includes("relation \"user_profiles\" does not exist")
-    ) {
-      setProfileCloudStatus("unavailable");
-      setErrorText(profileResult.error.message);
-      return;
-    }
-
-    if (!profileResult.data) {
-      const created = await saveProfileToCloud(false);
-      if (created) {
-        setProfileCloudStatus("synced");
-        setProfileLastSyncAt(new Date().toISOString());
-      } else {
-        setProfileCloudStatus("missing");
-      }
-      if (showStatus) {
-        setStatusText("Cloud-Profil wurde neu angelegt.");
-      }
-      return;
-    }
-    const cloudProfile = profileResult.data;
-
-    setProfile((current) => ({
-      ...current,
-      displayName: cloudProfile.display_name ?? "",
-      goal: cloudProfile.goal ?? "",
-      preferredCategories: Array.isArray(cloudProfile.preferred_categories)
-        ? cloudProfile.preferred_categories
-        : [],
-      weightUnit: cloudProfile.weight_unit === "lbs" ? "lbs" : "kg",
-      reminderTime: cloudProfile.reminder_time || "07:00",
-    }));
-    setProfileCloudStatus("synced");
-    setProfileLastSyncAt(new Date().toISOString());
-    if (showStatus) {
-      setStatusText("Profil aus Cloud geladen.");
-    }
-    setErrorText("");
-  };
-
-  const saveProfileToCloud = async (showStatus: boolean) => {
-    if (!supabase || !session?.user.id) {
-      setProfileCloudStatus("unavailable");
-      setErrorText("Nicht angemeldet oder Supabase nicht konfiguriert.");
-      return false;
-    }
-
-    let upsertResult = await supabase.from("user_profiles").upsert(
-      {
-        user_id: session.user.id,
-        display_name: profile.displayName.trim(),
-        goal: profile.goal.trim(),
-        preferred_categories: profile.preferredCategories,
-        weight_unit: profile.weightUnit,
-        reminder_time: profile.reminderTime || "07:00",
-      },
-      { onConflict: "user_id" },
-    );
-
-    if (
-      upsertResult.error?.message.includes("preferred_categories") ||
-      upsertResult.error?.message.includes("weight_unit") ||
-      upsertResult.error?.message.includes("reminder_time")
-    ) {
-      upsertResult = await supabase.from("user_profiles").upsert(
-        {
-          user_id: session.user.id,
-          display_name: profile.displayName.trim(),
-          goal: profile.goal.trim(),
-        },
-        { onConflict: "user_id" },
-      );
-    }
-
-    if (upsertResult.error?.message.includes("goal")) {
-      upsertResult = await supabase.from("user_profiles").upsert(
-        {
-          user_id: session.user.id,
-          display_name: profile.displayName.trim(),
-        },
-        { onConflict: "user_id" },
-      );
-    }
-
-    if (
-      upsertResult.error &&
-      !upsertResult.error.message.includes("relation \"user_profiles\" does not exist")
-    ) {
-      setProfileCloudStatus("unavailable");
-      setErrorText(upsertResult.error.message);
-      return false;
-    }
-
-    if (upsertResult.error?.message.includes("relation \"user_profiles\" does not exist")) {
-      setProfileCloudStatus("unavailable");
-      if (showStatus) {
-        setStatusText("Cloud-Profil Tabelle fehlt. Bitte schema.sql in Supabase ausführen.");
-      }
-      return false;
-    }
-
-    setProfileCloudStatus("synced");
-    setProfileLastSyncAt(new Date().toISOString());
-    if (showStatus) {
-      setStatusText("Profil in Cloud gespeichert.");
-    }
-    return true;
-  };
-
-  const sendMagicLink = async () => {
-    if (!supabase) {
-      setErrorText("Supabase-Konfiguration fehlt. Bitte .env.local setzen.");
-      return;
-    }
-
-    setAuthBusy(true);
-    setErrorText("");
-    setStatusText("");
-
-    const { error } = await supabase.auth.signInWithOtp({
-      email: authEmail,
-      options: {
-        emailRedirectTo: window.location.origin,
-      },
-    });
-
-    setAuthBusy(false);
-    if (error) {
-      setErrorText(error.message);
-      return;
-    }
-
-    setStatusText("Magic Link gesendet. Bitte Mail auf dem Handy öffnen.");
-  };
-
   const appendJournalArchive = (entry: JournalArchiveEntry) => {
-    if (typeof window === "undefined") return;
     try {
       const raw = localStorage.getItem(journalArchiveStorageKey);
-      const existing: JournalArchiveEntry[] = raw
-        ? (JSON.parse(raw) as JournalArchiveEntry[])
-        : [];
+      const existing = raw ? (JSON.parse(raw) as JournalArchiveEntry[]) : [];
       const filtered = existing.filter(
         (e) => !(e.dateKey === entry.dateKey && e.category === entry.category),
       );
@@ -2869,146 +2479,6 @@ export function RoutineJournal({
         text: reflection.text.trim(),
       });
     }
-  };
-
-  const saveCloud = async () => {
-    if (!supabase || !session?.user.id) {
-      setErrorText("Nicht angemeldet oder Supabase nicht konfiguriert.");
-      return;
-    }
-
-    if (activeExerciseTimer) {
-      pauseExerciseTimer(activeExerciseTimer.exercise);
-    }
-
-    setStatusText("");
-    setErrorText("");
-
-    const payloadWithTimers = visibleEntries.map((entry) => ({
-      user_id: session.user.id,
-      entry_date: selectedDate,
-      category: selectedCategory,
-      exercise: entry.exercise,
-      completed: entry.completed,
-      sets: parsePositiveInt(entry.sets),
-      completed_sets: entry.completedSets,
-      set_logs:
-        entry.setLogs.length > 0
-          ? entry.setLogs.map((setLog) => ({
-              reps: setLog.reps.trim(),
-              weightKg: setLog.weightKg.trim(),
-              done: setLog.done,
-              kind: setLog.kind,
-            }))
-          : null,
-      reps: parsePositiveInt(entry.reps),
-      weight_kg: parsePositiveInt(entry.weightKg),
-      duration_minutes: parsePositiveInt(entry.durationMinutes),
-      target_minutes: parsePositiveInt(entry.targetMinutes),
-      tracked_seconds: entry.trackedSeconds,
-      notes: entry.notes.trim() || null,
-    }));
-
-    let upsertResult = await supabase
-      .from("daily_entries")
-      .upsert(payloadWithTimers, { onConflict: "user_id,entry_date,category,exercise" });
-
-    if (
-      upsertResult.error?.message.includes("sets") ||
-      upsertResult.error?.message.includes("completed_sets") ||
-      upsertResult.error?.message.includes("set_logs") ||
-      upsertResult.error?.message.includes("weight_kg") ||
-      upsertResult.error?.message.includes("target_minutes") ||
-      upsertResult.error?.message.includes("tracked_seconds")
-    ) {
-      const payloadFallback = visibleEntries.map((entry) => ({
-        user_id: session.user.id,
-        entry_date: selectedDate,
-        category: selectedCategory,
-        exercise: entry.exercise,
-        completed: entry.completed,
-        reps: parsePositiveInt(entry.reps),
-        duration_minutes: parsePositiveInt(entry.durationMinutes),
-        notes: entry.notes.trim() || null,
-      }));
-      upsertResult = await supabase
-        .from("daily_entries")
-        .upsert(payloadFallback, { onConflict: "user_id,entry_date,category,exercise" });
-    }
-
-    if (upsertResult.error) {
-      setErrorText(upsertResult.error.message);
-      return;
-    }
-
-    let reflectionResult = await supabase.from("daily_reflections").upsert(
-      {
-        user_id: session.user.id,
-        entry_date: selectedDate,
-        category: selectedCategory,
-        mood: reflection.flowScore ? `Score ${reflection.flowScore}` : "Check-in",
-        reflection: reflection.text.trim(),
-        overall_seconds: overallLiveSeconds,
-        flow_score: parsePositiveInt(reflection.flowScore),
-        flow_note: reflection.text.trim(),
-      },
-      { onConflict: "user_id,entry_date,category" },
-    );
-
-    if (
-      reflectionResult.error?.message.includes("flow_score") ||
-      reflectionResult.error?.message.includes("flow_note")
-    ) {
-      reflectionResult = await supabase.from("daily_reflections").upsert(
-        {
-          user_id: session.user.id,
-          entry_date: selectedDate,
-          category: selectedCategory,
-          mood: reflection.flowScore ? `Score ${reflection.flowScore}` : "Check-in",
-          reflection: reflection.text.trim(),
-          overall_seconds: overallLiveSeconds,
-        },
-        { onConflict: "user_id,entry_date,category" },
-      );
-    }
-
-    if (
-      reflectionResult.error &&
-      !reflectionResult.error.message.includes("relation \"daily_reflections\" does not exist")
-    ) {
-      setErrorText(reflectionResult.error.message);
-      return;
-    }
-
-    const profileSyncOk = await saveProfileToCloud(false);
-    if (!profileSyncOk) {
-      return;
-    }
-
-    if (reflection.text.trim()) {
-      appendJournalArchive({
-        dateKey: selectedDate,
-        category: selectedCategory,
-        mood: reflection.flowScore ? `Score ${reflection.flowScore}` : "Score -",
-        text: reflection.text.trim(),
-      });
-    }
-
-    setOverallBaseSeconds(overallLiveSeconds);
-    setOverallStartedAtMs(null);
-    setStatusText("Cloud-Sync gespeichert.");
-  };
-
-  const signOut = async () => {
-    if (!supabase) {
-      return;
-    }
-    const { error } = await supabase.auth.signOut();
-    if (error) {
-      setErrorText(error.message);
-      return;
-    }
-    setStatusText("Abgemeldet.");
   };
 
   useEffect(() => {
@@ -3483,7 +2953,7 @@ export function RoutineJournal({
 
   return (
     <section className="flex flex-1 flex-col gap-4 bg-[radial-gradient(circle_at_top,_rgba(45,212,191,0.14),transparent_44%)] pb-32 sm:pb-28">
-      {activeTab === "lite" && hiddenLiteHero ? (
+      {hiddenLiteHero ? (
         <div className="overflow-hidden rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 via-orange-50 to-yellow-50 shadow-sm">
           <div className="relative h-64 w-full bg-rose-100 sm:h-72">
             <Image
@@ -3519,110 +2989,15 @@ export function RoutineJournal({
         </header>
       )}
 
-      {showOfflineCopyButton || activeTab === "lite" ? (
-        <div className="flex gap-2 rounded-2xl bg-[#e9f7f3] p-1.5 shadow-inner shadow-emerald-100 dark:bg-slate-800">
-          <button
-            type="button"
-            onClick={() => {
-              setOverallStartedAtMs(null);
-              setActiveExerciseTimer(null);
-              setActiveTab("cloud");
-            }}
-            className={`touch-manipulation flex-1 rounded-xl px-3 py-2.5 text-[15px] font-semibold transition ${
-              activeTab === "cloud"
-                ? "bg-white text-slate-900 shadow-sm ring-1 ring-teal-200 dark:bg-slate-900 dark:text-teal-300"
-                : "text-slate-700 dark:text-slate-200"
-            }`}
-          >
-            Cloud Journal
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setOverallStartedAtMs(null);
-              setActiveExerciseTimer(null);
-              setActiveTab("lite");
-            }}
-            className={`touch-manipulation flex-1 rounded-xl px-3 py-2.5 text-[15px] font-semibold transition ${
-              activeTab === "lite"
-                ? "bg-white text-slate-900 shadow-sm ring-1 ring-teal-200 dark:bg-slate-900 dark:text-teal-300"
-                : "text-slate-700 dark:text-slate-200"
-            }`}
-          >
-            Offline Kopie
-          </button>
-        </div>
-      ) : null}
-
-      {showLiteLink ? (
-        <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
-          Direkt zur Lite-Ansicht:{" "}
-          <Link className="text-teal-800 underline dark:text-teal-300" href="/lite">
-            /lite
-          </Link>
-        </p>
-      ) : null}
-
       <div className="relative rounded-[24px] border border-slate-200 bg-white/90 p-3 shadow-[0_12px_28px_rgba(15,23,42,0.04)] dark:border-slate-700 dark:bg-slate-900">
         <div className="flex items-start justify-between gap-3">
-          <div className="flex-1">
+          <div className="min-w-0 flex-1">
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-300">
-              Account
+              Profil
             </p>
-            {activeTab === "cloud" ? (
-              !supabaseReady ? (
-                <p className="mt-1 text-sm font-medium text-rose-700 dark:text-rose-300">
-                  Supabase noch nicht konfiguriert (.env.local).
-                </p>
-              ) : session ? (
-                <div className="mt-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
-                      Eingeloggt: {session.user.email}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={signOut}
-                      className="touch-manipulation rounded-lg border border-emerald-700 px-3 py-1.5 text-xs font-semibold text-emerald-800 dark:text-emerald-300"
-                    >
-                      Abmelden
-                    </button>
-                  </div>
-                  <p className="mt-1 text-xs font-medium text-slate-600 dark:text-slate-300">
-                    Profilstatus:{" "}
-                    {profileCloudStatus === "synced"
-                      ? `Cloud-Sync aktiv${profileLastSyncAt ? ` (${new Date(profileLastSyncAt).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })})` : ""}`
-                      : profileCloudStatus === "missing"
-                        ? "Wird angelegt"
-                        : profileCloudStatus === "unavailable"
-                          ? "Cloud aktuell nicht erreichbar"
-                          : "Warte auf ersten Sync"}
-                  </p>
-                </div>
-              ) : (
-                <div className="mt-1 grid gap-2 sm:grid-cols-[1fr_auto]">
-                  <input
-                    type="email"
-                    value={authEmail}
-                    onChange={(event) => setAuthEmail(event.target.value)}
-                    placeholder="deine@email.de"
-                    className="rounded-lg border border-slate-400 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
-                  />
-                  <button
-                    type="button"
-                    disabled={authBusy || !authEmail}
-                    onClick={sendMagicLink}
-                    className="touch-manipulation rounded-lg bg-teal-700 px-3 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Magic Link senden
-                  </button>
-                </div>
-              )
-            ) : (
-              <p className="mt-1 text-sm font-medium text-slate-600 dark:text-slate-300">
-                Offline Modus aktiv (lokale Speicherung).
-              </p>
-            )}
+            <p className="mt-1 text-sm font-medium text-slate-600 dark:text-slate-300">
+              Offline Modus — alles bleibt lokal auf diesem Gerät.
+            </p>
           </div>
           <button
             type="button"
@@ -3640,28 +3015,6 @@ export function RoutineJournal({
               <p className="text-sm font-bold uppercase tracking-[0.14em] text-slate-700 dark:text-slate-200">
                 Profil & Einstellungen
               </p>
-              {activeTab === "cloud" ? (
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void loadProfileFromCloud(true);
-                    }}
-                    className="touch-manipulation rounded-lg border border-teal-600 px-3 py-1.5 text-xs font-semibold text-teal-800 dark:text-teal-300"
-                  >
-                    Cloud laden
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void saveProfileToCloud(true);
-                    }}
-                    className="touch-manipulation rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-semibold text-white"
-                  >
-                    Cloud speichern
-                  </button>
-                </div>
-              ) : null}
             </div>
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <label className="flex flex-col gap-1 text-sm font-medium text-slate-900 dark:text-slate-100">
@@ -4718,7 +4071,7 @@ export function RoutineJournal({
                   return (
                     <div
                       key={`builder-pick-${entry.exercise}`}
-                      className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 ${
+                      className={`flex min-w-0 items-center gap-2 rounded-lg border px-2 py-1.5 ${
                         enabled
                           ? "border-teal-500 bg-teal-100 dark:border-teal-600 dark:bg-teal-900/40"
                           : "border-slate-300 bg-white dark:border-slate-700 dark:bg-slate-900"
@@ -4727,7 +4080,7 @@ export function RoutineJournal({
                       <button
                         type="button"
                         onClick={() => toggleBuilderExercise(entry.exercise, !enabled)}
-                        className="flex min-h-11 flex-1 items-center gap-2 text-left text-sm font-semibold text-slate-900 dark:text-slate-100"
+                        className="flex min-h-11 min-w-0 flex-1 items-center gap-2 text-left text-sm font-semibold text-slate-900 dark:text-slate-100"
                         aria-pressed={enabled}
                       >
                         <span
@@ -4739,7 +4092,7 @@ export function RoutineJournal({
                         >
                           ✓
                         </span>
-                        <span className="truncate">{entry.exercise}</span>
+                        <span className="min-w-0 break-words">{entry.exercise}</span>
                       </button>
                       <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-700 dark:bg-slate-700 dark:text-slate-100">
                         {resolveExerciseMuscleGroup(entry.exercise)}
@@ -4836,7 +4189,7 @@ export function RoutineJournal({
                     return (
                     <div
                       key={`builder-tune-${entry.exercise}`}
-                      className="rounded-lg border border-teal-200 bg-white p-2 dark:border-teal-800 dark:bg-slate-900"
+                      className="min-w-0 rounded-lg border border-teal-200 bg-white p-2 dark:border-teal-800 dark:bg-slate-900"
                       draggable
                       onDragStart={() => setDraggingExercise(entry.exercise)}
                       onDragOver={(event) => event.preventDefault()}
@@ -4848,7 +4201,7 @@ export function RoutineJournal({
                       }}
                       onDragEnd={() => setDraggingExercise(null)}
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
                         <button
                           type="button"
                           onClick={() => moveExerciseToStart(entry.exercise)}
@@ -4858,7 +4211,7 @@ export function RoutineJournal({
                         >
                           {position + 1}
                         </button>
-                        <span className="min-w-0 flex-1 truncate text-sm font-bold text-slate-900 dark:text-slate-100">
+                        <span className="min-w-0 flex-1 break-words text-sm font-bold text-slate-900 dark:text-slate-100">
                           {entry.exercise}
                         </span>
                         <div className="flex shrink-0 gap-1">
@@ -5062,14 +4415,14 @@ export function RoutineJournal({
                 ) : null}
               </div>
             </div>
-            {!loadingEntries && displayEntries.length > 0 ? (
+            {displayEntries.length > 0 ? (
               <div className="mt-2 flex flex-wrap gap-2">
                 {displayEntries.map((entry, index) => (
                   <button
                     key={`queue-${entry.exercise}`}
                     type="button"
                     onClick={() => setWorkoutCardOpenExercise(entry.exercise)}
-                    className={`touch-manipulation rounded-full border px-2.5 py-1.5 text-xs font-semibold ${
+                    className={`touch-manipulation max-w-full break-words rounded-full border px-2.5 py-1.5 text-left text-xs font-semibold ${
                       currentWorkoutExercise === entry.exercise
                         ? "border-indigo-500 bg-indigo-100 text-indigo-900"
                         : entry.completed
@@ -5082,9 +4435,7 @@ export function RoutineJournal({
                 ))}
               </div>
             ) : null}
-            {loadingEntries ? (
-              <p className="mt-2 text-sm font-medium text-slate-700 dark:text-slate-200">Lade Cloud-Daten ...</p>
-            ) : (
+            {(
               <div className="mt-2 grid gap-3">
                 {displayEntries.map((entry) => {
                   const timerRunning =
@@ -5097,23 +4448,23 @@ export function RoutineJournal({
                   return (
                     <article
                       key={`active-${entry.exercise}`}
-                      className={`rounded-xl border p-3 ${
+                      className={`min-w-0 rounded-xl border p-3 ${
                         isFocusedCard
                           ? "border-indigo-500 bg-indigo-50 shadow-sm dark:bg-indigo-950/40"
                           : "border-slate-300 bg-white dark:border-slate-700 dark:bg-slate-900"
                       }`}
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <label className="flex min-w-0 items-start gap-2.5">
+                      <div className="flex min-w-0 flex-wrap items-start gap-2">
+                        <label className="flex min-w-0 flex-1 items-start gap-2.5">
                           <input
                             type="checkbox"
                             checked={entry.completed}
                             onChange={(event) =>
                               handleCompletedToggle(entry.exercise, event.target.checked)
                             }
-                            className="mt-0.5 h-5 w-5 accent-indigo-700"
+                            className="mt-0.5 h-5 w-5 shrink-0 accent-indigo-700"
                           />
-                          <span className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          <span className="min-w-0 break-words text-sm font-semibold text-slate-900 dark:text-slate-100">
                             {activeExercises.indexOf(entry.exercise) + 1}. {entry.exercise}
                           </span>
                         </label>
@@ -5144,7 +4495,7 @@ export function RoutineJournal({
                               onClick={() => completeBodybuildingAndNext(entry.exercise)}
                               className="touch-manipulation rounded-md bg-indigo-700 px-2.5 py-1.5 text-xs font-semibold text-white"
                             >
-                              Done & Next
+                              Done &amp; Next
                             </button>
                           ) : null}
                         </div>
@@ -5616,7 +4967,7 @@ export function RoutineJournal({
               {flowExerciseStates.map((item, index) => (
                 <div
                   key={`flow-step-${item.exercise}`}
-                  className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 text-xs font-semibold ${
+                  className={`flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2 text-xs font-semibold ${
                     item.done
                       ? "border-emerald-500 bg-emerald-600 text-white"
                       : item.active
@@ -5624,7 +4975,9 @@ export function RoutineJournal({
                         : "border-slate-300 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                   }`}
                 >
-                  <span className="min-w-0 flex-1 truncate">
+                  {/* Long names wrap instead of being cut off, so the controls
+                      on the right stay reachable on narrow screens. */}
+                  <span className="min-w-0 flex-1 break-words">
                     {index + 1}. {item.done ? "✓ " : ""}
                     {item.exercise}
                   </span>
@@ -5782,51 +5135,36 @@ export function RoutineJournal({
 
 
         <div className="mt-4 flex flex-wrap gap-2.5">
-          {activeTab === "cloud" ? (
-            <button
-              type="button"
-              onClick={saveCloud}
-              disabled={!session}
-              className="touch-manipulation rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Cloud-Sync speichern
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={saveLite}
-              className="touch-manipulation rounded-lg bg-indigo-700 px-4 py-2.5 text-sm font-semibold text-white"
-            >
-              Offline speichern
-            </button>
-          )}
-          {activeTab === "lite" ? (
-            <>
-              <button
-                type="button"
-                onClick={triggerOfflineImport}
-                className="touch-manipulation rounded-lg border border-indigo-600 px-4 py-2.5 text-sm font-semibold text-indigo-800 dark:text-indigo-300"
-              >
-                Offline laden
-              </button>
-              <button
-                type="button"
-                onClick={exportOfflineData}
-                className="touch-manipulation rounded-lg border border-slate-400 px-4 py-2.5 text-sm font-semibold text-slate-700 dark:text-slate-200 dark:border-slate-600"
-              >
-                Datei exportieren
-              </button>
-              <input
-                ref={offlineImportRef}
-                type="file"
-                accept="application/json,text/json,.json"
-                onChange={(event) => {
-                  void handleOfflineImport(event);
-                }}
-                className="hidden"
-              />
-            </>
-          ) : null}
+          <button
+            type="button"
+            onClick={saveLite}
+            className="touch-manipulation rounded-lg bg-indigo-700 px-4 py-2.5 text-sm font-semibold text-white"
+          >
+            Offline speichern
+          </button>
+          <button
+            type="button"
+            onClick={triggerOfflineImport}
+            className="touch-manipulation rounded-lg border border-indigo-600 px-4 py-2.5 text-sm font-semibold text-indigo-800 dark:text-indigo-300"
+          >
+            Offline laden
+          </button>
+          <button
+            type="button"
+            onClick={exportOfflineData}
+            className="touch-manipulation rounded-lg border border-slate-400 px-4 py-2.5 text-sm font-semibold text-slate-700 dark:text-slate-200 dark:border-slate-600"
+          >
+            Datei exportieren
+          </button>
+          <input
+            ref={offlineImportRef}
+            type="file"
+            accept="application/json,text/json,.json"
+            onChange={(event) => {
+              void handleOfflineImport(event);
+            }}
+            className="hidden"
+          />
         </div>
         </>
         ) : null}
@@ -5871,16 +5209,10 @@ export function RoutineJournal({
             </button>
             <button
               type="button"
-              onClick={() => {
-                if (activeTab === "cloud") {
-                  void saveCloud();
-                } else {
-                  saveLite();
-                }
-              }}
+              onClick={saveLite}
               className="touch-manipulation min-h-11 rounded-lg border border-indigo-500 px-3 py-2.5 text-xs font-semibold text-indigo-800 dark:text-indigo-300"
             >
-              {activeTab === "cloud" ? "Cloud Save" : "Offline Save"}
+              Offline Save
             </button>
           </div>
         </div>

@@ -1,15 +1,17 @@
-# Momentum Journal (Next.js + Supabase + PWA)
+# Momentum Journal (Offline PWA)
 
-Mobil-first Journal fuer Morgenroutine, HIT und Running/Cardio:
-- Cloud Journal mit Magic-Link Login
-- Cloud-Profil-Sync (Name, Ziel, Kategorien, Einheit, Reminder)
-- Offline Lite Modus ohne Login
-- Overall Timer + Start/Stop pro Uebung
-- Zielzeit pro Uebung
-- Morning-Flow Check-in (0-10 + Freitext) mit Tracking
+Mobil-first Journal fuer Morgenroutine, Yoga, Tabata, HIT, Running/Cardio und
+Bodybuilding. Die App laeuft **komplett offline** – kein Login, kein Server,
+keine Cloud. Alle Daten liegen im `localStorage` des Geraets.
+
+- Workout-Flow mit Timer, Audio-Signalen und Vollbild-Fokus
+- Builder: Uebungen waehlen, Reihenfolge festlegen, Saetze und Satzart pflegen
+- 23 evidenzbasierte Preset-Routinen
 - Bodybuilding Satz-Logging (Reps + Gewicht pro Satz, DONE pro Satz)
+- Taeglicher Check-in (0-10 Smiley + Freitext)
+- Activity Tracker mit Zielen, PRs, Tonnage und Stimmungs-Trend
 - Eigene Uebungen hinzufuegen, ausblenden und verwalten
-- Uebungsuebersicht ueber alle Kategorien
+- Sicherung per JSON-Export/Import (auf iOS direkt in iCloud Drive)
 
 ## Lokaler Start
 
@@ -18,56 +20,65 @@ npm install
 npm run dev
 ```
 
-In PowerShell:
-
-```powershell
-Copy-Item .env.example .env.local
-```
-
 Danach [http://localhost:3000](http://localhost:3000) oeffnen.
 
-## Supabase einrichten
+## Offline-Build
 
-1. Projekt in Supabase erstellen.
-2. In **Authentication > Sign In / Providers** E-Mail (Magic Link/OTP) aktivieren.
-3. SQL aus [supabase/schema.sql](./supabase/schema.sql) ausfuehren.
-4. In `.env.local` setzen:
-
-```env
-NEXT_PUBLIC_SUPABASE_URL=...
-NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+```bash
+npm run build:offline
 ```
 
-## Netlify Deployment
+Ergebnis: Ordner `out/`. Diesen kannst du auf einen USB-Stick, ins Heimnetz oder
+auf ein beliebiges statisches Hosting kopieren.
 
-1. Repo in GitLab pushen.
-2. In Netlify: **Add new site > Import an existing project > GitLab**.
-3. Build:
-   - Build command: `npm run build`
-   - Publish directory: `.next`
-4. Env Vars:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+### Starten
 
-## Deployment
+Ein einfacher lokaler Webserver genuegt:
 
-Die App ist ein reiner Client (localStorage). Für `/lite` wird **kein Server**
-benötigt – jedes statische Hosting genügt.
+```bash
+cd out
+python -m http.server 8080
+# danach im Browser: http://localhost:8080/
+```
 
-### Vercel (empfohlen für Hosting)
+> Ein Webserver ist noetig, weil Browser Service Worker und PWA-Installation
+> unter `file://` nicht erlauben. Beim ersten Aufruf cached der Service Worker
+> die App; danach funktioniert sie auch **ohne laufenden Server**.
+
+### Auf dem Handy
+
+1. `npm run build:offline`
+2. `out/` auf ein statisches Hosting legen (siehe unten) oder im WLAN per
+   `python -m http.server` freigeben.
+3. Seite in Safari oeffnen → Teilen → **Zum Home-Bildschirm**.
+
+Danach laeuft die App als installierte PWA auch im Flugmodus.
+
+## Daten sichern
+
+- **Datei exportieren** schreibt alle `momentum-*` Schluessel in eine
+  JSON-Datei. Auf iOS oeffnet sich das Teilen-Menue, sodass du direkt in
+  **Dateien → iCloud Drive** sichern kannst.
+- **Offline laden** liest eine solche Datei wieder ein und laedt die App neu.
+
+Da alles lokal liegt, ist der Export die einzige Sicherung – vor dem Loeschen
+der Website-Daten oder einem Geraetewechsel unbedingt exportieren.
+
+## Optionales Hosting
+
+Die App ist ein reiner Client. Jedes statische Hosting genuegt.
+
+### Vercel
 
 `vercel.json` ist enthalten:
 
 - Build command: `npm run build:offline`
 - Output directory: `out`
 
-Import des Repos genügt; Vercel erkennt die Konfiguration automatisch.
+Hinweis: Der Projektname muss klein geschrieben sein (z. B. `momentum-journal`),
+sonst lehnt Vercel den Import mit einem 400er ab.
 
 ### Netlify
-
-Zwei Varianten:
-
-**a) Statisch (empfohlen, spart Build-Minuten)**
 
 ```bash
 npm run build:offline
@@ -76,57 +87,7 @@ npx netlify-cli deploy --prod --dir=out
 
 Der Upload nutzt **keine Build-Minuten**, da lokal gebaut wird.
 
-**b) Mit Server-Build** (nur nötig für Supabase Cloud-Sync)
-
-Siehe `netlify.toml`. Achtung: Jeder Push auf den Produktionszweig verbraucht
-Build-Minuten.
-
-### Build-Minuten sparen
-
-- Nur den finalen Stand pushen, nicht jeden Zwischenschritt
-- Oder lokal bauen und `out/` hochladen (Variante a)
-
 ## Routen
 
-- `/` Cloud Journal
-- `/lite` Offline-Lite Journal
-
-## Offline-Version ohne Netlify und Supabase
-
-Die App lässt sich als reine statische Seite bauen. Es wird **kein Server, kein
-Netlify und kein Supabase** benötigt – alle Daten liegen im `localStorage` des
-Geräts.
-
-```bash
-npm run build:offline
-```
-
-Ergebnis: Ordner `out/` (~2 MB, 53 Dateien). Diesen Ordner kannst du auf einen
-USB-Stick, ins Heimnetz oder auf ein beliebiges Hosting kopieren.
-
-### Starten
-
-Ein einfacher lokaler Webserver genügt, z. B.:
-
-```bash
-cd out
-python -m http.server 8080
-# danach im Browser: http://localhost:8080/lite/
-```
-
-> Ein Webserver ist nötig, weil Browser Service Worker und PWA-Installation
-> unter `file://` nicht erlauben. Beim ersten Aufruf cached der Service Worker
-> die App; danach funktioniert sie auch **ohne laufenden Server**.
-
-### Was funktioniert offline
-
-- Alle Kategorien, Presets, Builder und der Workout-Flow
-- Timer, Signale, Satz-Logging, Ziele, Activity Tracker
-- Speichern via `localStorage`, Export/Import als JSON-Datei
-
-### Was in dieser Variante entfällt
-
-- Cloud-Sync und Login per Magic Link (`/` Cloud Journal ist ohne Supabase
-  funktionslos – nutze `/lite/`)
-- Geräteübergreifende Synchronisierung; Datensicherung erfolgt über
-  „Datei exportieren“
+- `/` Journal
+- `/lite` identische Ansicht ohne Hero-Header

@@ -1,4 +1,4 @@
-const CACHE_NAME = "momentum-journal-v2";
+const CACHE_NAME = "momentum-journal-v3";
 
 // Both variants are listed because the server build serves "/lite" while the
 // static export (trailingSlash) serves "/lite/".
@@ -70,6 +70,40 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // HTML must be network-first. A cache-first shell would keep serving the
+  // previous build's markup after a redeploy, and that markup references hashed
+  // asset chunks that no longer exist -> the app breaks until site data is
+  // cleared by hand. Hashed assets themselves stay cache-first (immutable).
+  if (request.mode === "navigate") {
+    event.respondWith(
+      (async () => {
+        try {
+          const networkResponse = await fetch(request);
+          if (networkResponse.ok) {
+            const cache = await caches.open(CACHE_NAME);
+            cache.put(request, networkResponse.clone()).catch(() => {});
+          }
+          return networkResponse;
+        } catch (error) {
+          const cached = await matchCached(request);
+          if (cached) {
+            return cached;
+          }
+          const cache = await caches.open(CACHE_NAME);
+          const fallback =
+            (await cache.match("/")) ??
+            (await cache.match("/lite/")) ??
+            (await cache.match("/lite"));
+          if (fallback) {
+            return fallback;
+          }
+          throw error;
+        }
+      })(),
+    );
+    return;
+  }
+
   event.respondWith(
     (async () => {
       const cached = await matchCached(request);
@@ -77,30 +111,14 @@ self.addEventListener("fetch", (event) => {
         return cached;
       }
 
-      try {
-        const networkResponse = await fetch(request);
-        if (networkResponse.ok) {
-          const cache = await caches.open(CACHE_NAME);
-          cache.put(request, networkResponse.clone()).catch(() => {
-            /* opaque or uncacheable response */
-          });
-        }
-        return networkResponse;
-      } catch (error) {
-        // Offline: serve the cached app shell for page navigations so the app
-        // still opens instead of showing a browser error page.
-        if (request.mode === "navigate") {
-          const cache = await caches.open(CACHE_NAME);
-          const fallback =
-            (await cache.match("/lite/")) ??
-            (await cache.match("/lite")) ??
-            (await cache.match("/"));
-          if (fallback) {
-            return fallback;
-          }
-        }
-        throw error;
+      const networkResponse = await fetch(request);
+      if (networkResponse.ok) {
+        const cache = await caches.open(CACHE_NAME);
+        cache.put(request, networkResponse.clone()).catch(() => {
+          /* opaque or uncacheable response */
+        });
       }
+      return networkResponse;
     })(),
   );
 });

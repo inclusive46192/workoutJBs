@@ -4,9 +4,9 @@ import path from "node:path";
 /**
  * Two build modes:
  *
- * - default (`npm run build`)  -> server build for Netlify, incl. Supabase sync
- * - `npm run build:offline`    -> fully static folder in ./out. No server,
- *                                 no Netlify, no Supabase required.
+ * - default (`npm run build`)  -> standard Next server build, used by `npm run dev`
+ * - `npm run build:offline`    -> fully static folder in ./out. No server and no
+ *                                 hosting provider required.
  */
 const isStaticExport = process.env.STATIC_EXPORT === "1";
 
