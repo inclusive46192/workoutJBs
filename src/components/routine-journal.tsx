@@ -538,54 +538,18 @@ export function RoutineJournal({
   } | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [hasMounted, setHasMounted] = useState(false);
+  // These three drive the rendered exercise list. They must start empty so the
+  // first client render matches the server HTML; localStorage is applied in an
+  // effect right after mount.
   const [customExercisesByCategory, setCustomExercisesByCategory] = useState<
     Record<string, string[]>
-  >(() => {
-    if (typeof window === "undefined") {
-      return {};
-    }
-    const raw = window.localStorage.getItem(customExercisesStorageKey);
-    if (!raw) {
-      return {};
-    }
-    try {
-      return JSON.parse(raw) as Record<string, string[]>;
-    } catch {
-      return {};
-    }
-  });
+  >({});
   const [hiddenExercisesByCategory, setHiddenExercisesByCategory] = useState<
     Record<string, string[]>
-  >(() => {
-    if (typeof window === "undefined") {
-      return {};
-    }
-    const raw = window.localStorage.getItem(hiddenExercisesStorageKey);
-    if (!raw) {
-      return {};
-    }
-    try {
-      return JSON.parse(raw) as Record<string, string[]>;
-    } catch {
-      return {};
-    }
-  });
+  >({});
   const [exerciseOrderByCategory, setExerciseOrderByCategory] = useState<
     Record<string, string[]>
-  >(() => {
-    if (typeof window === "undefined") {
-      return {};
-    }
-    const raw = window.localStorage.getItem(exerciseOrderStorageKey);
-    if (!raw) {
-      return {};
-    }
-    try {
-      return JSON.parse(raw) as Record<string, string[]>;
-    } catch {
-      return {};
-    }
-  });
+  >({});
   const [newExerciseName, setNewExerciseName] = useState("");
   const [bodyWeightKg, setBodyWeightKg] = useState("");
   const [dashboardRange, setDashboardRange] = useState<"7" | "30" | "90" | "all">("7");
@@ -742,6 +706,31 @@ export function RoutineJournal({
 
   useEffect(() => {
     setHasMounted(true);
+  }, []);
+
+  // Hydrate the list-shaping stores after mount to avoid an SSR mismatch.
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const readMap = (storageKey: string): Record<string, string[]> | null => {
+      const raw = window.localStorage.getItem(storageKey);
+      if (!raw) {
+        return null;
+      }
+      try {
+        return JSON.parse(raw) as Record<string, string[]>;
+      } catch {
+        return null;
+      }
+    };
+
+    const custom = readMap(customExercisesStorageKey);
+    if (custom) setCustomExercisesByCategory(custom);
+    const hidden = readMap(hiddenExercisesStorageKey);
+    if (hidden) setHiddenExercisesByCategory(hidden);
+    const order = readMap(exerciseOrderStorageKey);
+    if (order) setExerciseOrderByCategory(order);
   }, []);
 
   useEffect(() => {
@@ -1361,7 +1350,9 @@ export function RoutineJournal({
 
   const builderEntries = useMemo(() => {
     const byExercise = new Map(entries.map((entry) => [entry.exercise, entry]));
-    return allExercisesForCategory.map(
+    // Must follow the user-defined order, otherwise reordering has no visible
+    // effect in the builder.
+    return orderedExercisesForCategory.map(
       (exercise) =>
         byExercise.get(exercise) ?? {
           exercise,
@@ -1377,7 +1368,7 @@ export function RoutineJournal({
           notes: "",
         },
     );
-  }, [allExercisesForCategory, entries]);
+  }, [orderedExercisesForCategory, entries]);
 
   const completedCount = visibleEntries.filter((entry) => entry.completed).length;
   const categoryProfile = getCategoryProfile(selectedCategory);
@@ -2205,6 +2196,63 @@ export function RoutineJournal({
       localStorage.setItem(exerciseOrderStorageKey, JSON.stringify(next));
       return next;
     });
+  };
+
+  /**
+   * Moves an exercise one slot up or down within the *visible* list.
+   *
+   * The stored order also contains deactivated exercises, so the two entries
+   * are swapped by position instead of spliced. That keeps hidden exercises in
+   * their slot and makes the visible move predictable.
+   */
+  const moveExerciseInOrder = (exercise: string, direction: -1 | 1) => {
+    const visible = activeExercises;
+    const visibleIndex = visible.indexOf(exercise);
+    const neighbour = visible[visibleIndex + direction];
+    if (visibleIndex < 0 || !neighbour) {
+      return;
+    }
+
+    setExerciseOrderByCategory((current) => {
+      const currentOrder = current[selectedCategory] ?? orderedExercisesForCategory;
+      const from = currentOrder.indexOf(exercise);
+      const to = currentOrder.indexOf(neighbour);
+      if (from < 0 || to < 0) {
+        return current;
+      }
+      const nextOrder = [...currentOrder];
+      nextOrder[from] = neighbour;
+      nextOrder[to] = exercise;
+      const next = { ...current, [selectedCategory]: nextOrder };
+      localStorage.setItem(exerciseOrderStorageKey, JSON.stringify(next));
+      return next;
+    });
+    playHapticClick();
+  };
+
+  /** Sends an exercise straight to the first visible slot. */
+  const moveExerciseToStart = (exercise: string) => {
+    const firstVisible = activeExercises[0];
+    if (!firstVisible || firstVisible === exercise) {
+      return;
+    }
+    setExerciseOrderByCategory((current) => {
+      const currentOrder = current[selectedCategory] ?? orderedExercisesForCategory;
+      if (!currentOrder.includes(exercise)) {
+        return current;
+      }
+      const withoutExercise = currentOrder.filter((item) => item !== exercise);
+      const anchor = withoutExercise.indexOf(firstVisible);
+      if (anchor < 0) {
+        return current;
+      }
+      const nextOrder = [...withoutExercise];
+      nextOrder.splice(anchor, 0, exercise);
+      const next = { ...current, [selectedCategory]: nextOrder };
+      localStorage.setItem(exerciseOrderStorageKey, JSON.stringify(next));
+      return next;
+    });
+    playHapticClick();
   };
 
   const rememberQuickLoad = (type: QuickLoadType, name: string) => {
@@ -4768,8 +4816,8 @@ export function RoutineJournal({
             <div className="mt-3">
               <p className="text-xs text-teal-800 dark:text-teal-300">
                 {isIntervalCategory
-                  ? "Dauer pro Übung festlegen. Reihenfolge per Drag & Drop."
-                  : "Sätze, Reps und Gewicht vorbelegen. Reihenfolge per Drag & Drop."}
+                  ? "Dauer pro Übung festlegen. Reihenfolge über ↑ ↓ ändern."
+                  : "Sätze, Reps und Gewicht vorbelegen. Reihenfolge über ↑ ↓ ändern."}
               </p>
 
               {activeExercises.length === 0 ? (
@@ -4781,7 +4829,11 @@ export function RoutineJournal({
               <div className="mt-3 grid gap-2">
                 {builderEntries
                   .filter((entry) => !hiddenExercises.includes(entry.exercise))
-                  .map((entry) => (
+                  .map((entry) => {
+                    const position = activeExercises.indexOf(entry.exercise);
+                    const isFirst = position === 0;
+                    const isLast = position === activeExercises.length - 1;
+                    return (
                     <div
                       key={`builder-tune-${entry.exercise}`}
                       className="rounded-lg border border-teal-200 bg-white p-2 dark:border-teal-800 dark:bg-slate-900"
@@ -4796,13 +4848,39 @@ export function RoutineJournal({
                       }}
                       onDragEnd={() => setDraggingExercise(null)}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-sm font-bold text-slate-900 dark:text-slate-100">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => moveExerciseToStart(entry.exercise)}
+                          disabled={isFirst}
+                          title="Nach ganz oben"
+                          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-teal-700 text-sm font-black text-white disabled:opacity-40"
+                        >
+                          {position + 1}
+                        </button>
+                        <span className="min-w-0 flex-1 truncate text-sm font-bold text-slate-900 dark:text-slate-100">
                           {entry.exercise}
                         </span>
-                        <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-teal-700 dark:text-teal-300">
-                          ⠿ ziehen
-                        </span>
+                        <div className="flex shrink-0 gap-1">
+                          <button
+                            type="button"
+                            onClick={() => moveExerciseInOrder(entry.exercise, -1)}
+                            disabled={isFirst}
+                            aria-label={`${entry.exercise} nach oben`}
+                            className="flex h-11 w-11 items-center justify-center rounded-lg border-2 border-teal-600 text-base font-black text-teal-800 disabled:opacity-30 dark:border-teal-700 dark:text-teal-300"
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveExerciseInOrder(entry.exercise, 1)}
+                            disabled={isLast}
+                            aria-label={`${entry.exercise} nach unten`}
+                            className="flex h-11 w-11 items-center justify-center rounded-lg border-2 border-teal-600 text-base font-black text-teal-800 disabled:opacity-30 dark:border-teal-700 dark:text-teal-300"
+                          >
+                            ↓
+                          </button>
+                        </div>
                       </div>
 
                       <div className="mt-2 grid gap-2 sm:grid-cols-3">
@@ -4888,7 +4966,8 @@ export function RoutineJournal({
                         ) : null}
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
               </div>
 
               <div className="mt-4 grid grid-cols-2 gap-2">
@@ -5025,7 +5104,7 @@ export function RoutineJournal({
                       }`}
                     >
                       <div className="flex items-start justify-between gap-2">
-                        <label className="flex items-start gap-2.5">
+                        <label className="flex min-w-0 items-start gap-2.5">
                           <input
                             type="checkbox"
                             checked={entry.completed}
@@ -5034,17 +5113,41 @@ export function RoutineJournal({
                             }
                             className="mt-0.5 h-5 w-5 accent-indigo-700"
                           />
-                          <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">{entry.exercise}</span>
+                          <span className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
+                            {activeExercises.indexOf(entry.exercise) + 1}. {entry.exercise}
+                          </span>
                         </label>
-                        {isBodybuilding ? (
+                        <div className="flex shrink-0 items-center gap-1">
                           <button
                             type="button"
-                            onClick={() => completeBodybuildingAndNext(entry.exercise)}
-                            className="touch-manipulation rounded-md bg-indigo-700 px-2.5 py-1.5 text-xs font-semibold text-white"
+                            onClick={() => moveExerciseInOrder(entry.exercise, -1)}
+                            disabled={activeExercises.indexOf(entry.exercise) === 0}
+                            aria-label={`${entry.exercise} nach oben`}
+                            className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-400 text-sm font-black text-slate-700 disabled:opacity-25 dark:border-slate-600 dark:text-slate-200"
                           >
-                            Done & Next
+                            ↑
                           </button>
-                        ) : null}
+                          <button
+                            type="button"
+                            onClick={() => moveExerciseInOrder(entry.exercise, 1)}
+                            disabled={
+                              activeExercises.indexOf(entry.exercise) === activeExercises.length - 1
+                            }
+                            aria-label={`${entry.exercise} nach unten`}
+                            className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-400 text-sm font-black text-slate-700 disabled:opacity-25 dark:border-slate-600 dark:text-slate-200"
+                          >
+                            ↓
+                          </button>
+                          {isBodybuilding ? (
+                            <button
+                              type="button"
+                              onClick={() => completeBodybuildingAndNext(entry.exercise)}
+                              className="touch-manipulation rounded-md bg-indigo-700 px-2.5 py-1.5 text-xs font-semibold text-white"
+                            >
+                              Done & Next
+                            </button>
+                          ) : null}
+                        </div>
                       </div>
 
                       {isFocusedCard ? (
@@ -5509,11 +5612,11 @@ export function RoutineJournal({
               ) : null}
             </div>
 
-            <div className="mt-3 grid gap-1.5 sm:grid-cols-2">
+            <div className="mt-3 grid gap-1.5">
               {flowExerciseStates.map((item, index) => (
                 <div
                   key={`flow-step-${item.exercise}`}
-                  className={`flex items-center justify-between gap-2 rounded-lg border px-2.5 py-2 text-xs font-semibold ${
+                  className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 text-xs font-semibold ${
                     item.done
                       ? "border-emerald-500 bg-emerald-600 text-white"
                       : item.active
@@ -5521,13 +5624,37 @@ export function RoutineJournal({
                         : "border-slate-300 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                   }`}
                 >
-                  <span className="truncate">
+                  <span className="min-w-0 flex-1 truncate">
                     {index + 1}. {item.done ? "✓ " : ""}
                     {item.exercise}
                   </span>
                   <span className="shrink-0 tabular-nums opacity-80">
                     {getWorkSecondsFor(item.exercise)}s
                   </span>
+                  {/* Reordering only outside a running session, so the phase
+                      engine never changes course mid-exercise. */}
+                  {intervalPhase === "idle" ? (
+                    <div className="flex shrink-0 gap-1">
+                      <button
+                        type="button"
+                        onClick={() => moveExerciseInOrder(item.exercise, -1)}
+                        disabled={index === 0}
+                        aria-label={`${item.exercise} nach oben`}
+                        className="flex h-9 w-9 items-center justify-center rounded-md border border-current text-sm font-black disabled:opacity-25"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => moveExerciseInOrder(item.exercise, 1)}
+                        disabled={index === flowExerciseStates.length - 1}
+                        aria-label={`${item.exercise} nach unten`}
+                        className="flex h-9 w-9 items-center justify-center rounded-md border border-current text-sm font-black disabled:opacity-25"
+                      >
+                        ↓
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               ))}
             </div>
