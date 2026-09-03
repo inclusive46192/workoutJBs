@@ -1,8 +1,9 @@
 # Momentum Journal (Offline PWA)
 
 Mobil-first Journal fuer Morgenroutine, Yoga, HIT (inkl. Tabata) und
-Bodybuilding. Die App laeuft **komplett offline** – kein Login, kein Server,
-keine Cloud. Alle Daten liegen im `localStorage` des Geraets.
+Bodybuilding. Die App laeuft **komplett offline** – ohne Login, ohne Server.
+Alle Daten liegen im `localStorage` des Geraets. Ein Cloud-Backup ist optional
+zuschaltbar (siehe unten).
 
 - Workout-Flow mit Timer, Audio-Signalen und Vollbild-Fokus
 - Bewegungs-Anleitung je Uebung: Form-Hinweise, bei der Morgenroutine
@@ -19,6 +20,7 @@ keine Cloud. Alle Daten liegen im `localStorage` des Geraets.
 - Eigene Uebungen hinzufuegen, ausblenden und verwalten
 - **Autosave**: Aenderungen werden automatisch gespeichert
 - Sicherung per JSON-Export/Import (auf iOS direkt in iCloud Drive)
+- Optionales Cloud-Backup mit Login (Magic Link, Code, Google/GitHub)
 
 ## Lokaler Start
 
@@ -141,6 +143,54 @@ dort, wo sie ehrlich funktionieren:
 Zwei Morgenroutine-Uebungen (World's Best Stretch, Lunge Front Reach) haben
 ebenfalls keine Figur: ihre 3D-Rotation laesst sich als flache Strichfigur nicht
 verstaendlich darstellen. Lieber nichts als etwas Irrefuehrendes.
+
+## Cloud-Backup (optional)
+
+Die App funktioniert vollstaendig ohne Konto. Wer die Daten geraeteuebergreifend
+sichern will, kann ein Supabase-Projekt anbinden – dann ersetzt der Login das
+manuelle Exportieren.
+
+**Wichtig:** Lokal bleibt die Wahrheit, die Cloud ist nur ein Spiegel. Ohne Netz
+laeuft die App unveraendert weiter.
+
+### Einrichtung
+
+1. Projekt auf [supabase.com](https://supabase.com) anlegen (Free Tier genuegt).
+2. Im SQL-Editor [supabase/schema.sql](./supabase/schema.sql) ausfuehren. Das
+   legt die Tabelle `backups` an und aktiviert Row Level Security, sodass jeder
+   Nutzer ausschliesslich seine eigene Zeile sieht.
+3. Unter **Authentication → Providers** aktivieren, was du nutzen willst:
+   - **Email** – liefert Magic Link *und* 6-stelligen Code in derselben Mail
+   - **Google / GitHub** – jeweils Client-ID und Secret hinterlegen
+4. Unter **Authentication → URL Configuration** die Site-URL und die Redirect-
+   URLs eintragen, z. B. `https://<projekt>.vercel.app` und
+   `http://localhost:3000` fuer die lokale Entwicklung.
+5. `.env.local` anlegen:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://<projekt-id>.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon public key>
+```
+
+6. Dieselben zwei Variablen in Vercel unter **Settings → Environment Variables**
+   hinterlegen und neu deployen.
+
+Fehlen die Variablen, blendet die App den Cloud-Bereich einfach aus und
+verhaelt sich wie der reine Offline-Build.
+
+### Wie der Abgleich funktioniert
+
+- Nach dem Login wird **erst geladen, dann hochgeladen**, damit beide Seiten
+  konvergieren.
+- Der Download **fuehrt zusammen** und ueberschreibt nicht: es gilt dieselbe
+  Konfliktregel wie beim Datei-Import (mehr erledigte Uebungen gewinnt, erst
+  bei Gleichstand entscheidet `updatedAt`). Eine veraltete Cloud-Kopie kann
+  also keine offline geloggte Einheit loeschen.
+- Aenderungen werden verzoegert hochgeladen, damit nicht jeder Tastendruck
+  eine Anfrage ausloest.
+- Die Anmeldung bleibt bestehen, bis man sich aktiv abmeldet.
+- Der Datei-Export bleibt unveraendert verfuegbar und ist weiterhin die
+  Sicherung, die unabhaengig von einem Dienst funktioniert.
 
 ## Optionales Hosting
 Die App ist ein reiner Client. Jedes statische Hosting genuegt.

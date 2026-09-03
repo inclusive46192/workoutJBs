@@ -40,6 +40,8 @@ import {
   type GoalType,
 } from "@/lib/goals";
 import { useWakeLock } from "@/hooks/use-wake-lock";
+import { useAuth, type AuthProvider } from "@/hooks/use-auth";
+import { syncWithCloud } from "@/lib/cloud-sync";
 import {
   cancelScheduledCues,
   playHapticClick,
@@ -603,6 +605,20 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     phase: "idle" | "picking" | "busy" | "success" | "error";
     message: string;
   }>({ phase: "idle", message: "" });
+
+  // ---------------------------------------------------------------- cloud
+  const auth = useAuth();
+  const [authEmail, setAuthEmail] = useState("");
+  const [authCode, setAuthCode] = useState("");
+  const [codeSent, setCodeSent] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(
+    null,
+  );
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudMessage, setCloudMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(
+    null,
+  );
   const [hitWorkSeconds, setHitWorkSeconds] = useState(40);
   const [hitRestSeconds, setHitRestSeconds] = useState(20);
   const [prepSecondsSetting, setPrepSecondsSetting] = useState(10);
@@ -783,6 +799,38 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     input.addEventListener("cancel", onCancel);
     return () => input.removeEventListener("cancel", onCancel);
   }, []);
+
+  /**
+   * Reconcile with the cloud once per signed-in session. Runs after login and
+   * on every app start while signed in, so a new device pulls the history
+   * automatically instead of the user hunting for a backup file.
+   */
+  const syncedForUserRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!auth.session || !auth.userId || auth.loading) {
+      return;
+    }
+    if (syncedForUserRef.current === auth.userId) {
+      return;
+    }
+    syncedForUserRef.current = auth.userId;
+    // Signing in replaces the file-based restore path.
+    setShowRestorePrompt(false);
+    void runCloudSync(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auth.loading, auth.session, auth.userId]);
+
+  /** Push local changes up, debounced, so the cloud copy stays current. */
+  useEffect(() => {
+    if (!auth.client || !auth.userId || statsVersion === 0) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void runCloudSync(true);
+    }, 4000);
+    return () => window.clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statsVersion, auth.client, auth.userId]);
 
   // Hydrate the list-shaping stores after mount to avoid an SSR mismatch.
   useEffect(() => {
@@ -2671,6 +2719,81 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     offlineImportRef.current?.click();
   };
 
+  // ------------------------------------------------------- cloud handlers
+  const handleSendCode = async () => {
+    setAuthBusy(true);
+    const result = await auth.sendEmailCode(authEmail);
+    setAuthBusy(false);
+    setAuthMessage({ tone: result.ok ? "ok" : "error", text: result.message });
+    if (result.ok) {
+      setCodeSent(true);
+    }
+  };
+
+  const handleVerifyCode = async () => {
+    setAuthBusy(true);
+    const result = await auth.verifyEmailCode(authEmail, authCode);
+    setAuthBusy(false);
+    setAuthMessage({ tone: result.ok ? "ok" : "error", text: result.message });
+    if (result.ok) {
+      setAuthCode("");
+      setCodeSent(false);
+    }
+  };
+
+  const handleProviderSignIn = async (provider: AuthProvider) => {
+    setAuthBusy(true);
+    const result = await auth.signInWithProvider(provider);
+    // On success the browser navigates away, so only failures land here.
+    if (!result.ok) {
+      setAuthBusy(false);
+      setAuthMessage({ tone: "error", text: result.message });
+    }
+  };
+
+  const handleSignOut = async () => {
+    setCloudBusy(true);
+    const result = await auth.signOut();
+    setCloudBusy(false);
+    setCloudMessage(null);
+    setAuthMessage({ tone: result.ok ? "ok" : "error", text: result.message });
+  };
+
+  /** Pull-then-push so both sides converge without losing local sessions. */
+  const runCloudSync = async (silent = false) => {
+    if (!auth.client || !auth.userId) {
+      return;
+    }
+    setCloudBusy(true);
+    const result = await syncWithCloud(auth.client, auth.userId);
+    setCloudBusy(false);
+
+    if (!result.ok) {
+      setCloudMessage({ tone: "error", text: result.error });
+      return;
+    }
+    if (result.kind === "pulled") {
+      const { daysAdded, daysUpdated } = result.summary;
+      const changed = daysAdded + daysUpdated;
+      setCloudMessage({
+        tone: "ok",
+        text:
+          changed > 0
+            ? `Cloud geladen: ${daysAdded} ergänzt, ${daysUpdated} aktualisiert.`
+            : "Cloud ist auf dem aktuellen Stand.",
+      });
+      if (changed > 0) {
+        // Re-read storage so the dashboard reflects the merged history.
+        setStatsVersion((current) => current + 1);
+        setHistoryInfo(readLocalHistory());
+      }
+      return;
+    }
+    if (!silent) {
+      setCloudMessage({ tone: "ok", text: "In der Cloud gesichert." });
+    }
+  };
+
   const handleOfflineImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) {
@@ -3406,7 +3529,15 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
               Profil
             </p>
             <p className="mt-1 text-sm font-medium text-slate-600 dark:text-slate-300">
-              Offline Modus — alles bleibt lokal auf diesem Gerät.
+              {/* Gated on hasMounted: the Supabase client only exists in the
+                  browser, so rendering auth state during SSR would mismatch. */}
+              {!hasMounted
+                ? "Offline Modus — alles bleibt lokal auf diesem Gerät."
+                : auth.session
+                  ? `Cloud aktiv · ${auth.email}`
+                  : auth.configured
+                    ? "Offline Modus — anmelden für Cloud-Backup."
+                    : "Offline Modus — alles bleibt lokal auf diesem Gerät."}
             </p>
           </div>
           <button
@@ -3426,6 +3557,142 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                 Profil & Einstellungen
               </p>
             </div>
+
+            {auth.configured && hasMounted ? (
+              <div className="mt-3 rounded-xl border border-teal-200 bg-white p-3 dark:border-teal-900 dark:bg-slate-900">
+                <p className="text-xs font-bold uppercase tracking-[0.14em] text-teal-800 dark:text-teal-300">
+                  Cloud-Backup
+                </p>
+
+                {auth.loading ? (
+                  <p className="mt-2 text-sm font-medium text-slate-600 dark:text-slate-300">
+                    Prüfe Anmeldung ...
+                  </p>
+                ) : auth.session ? (
+                  <>
+                    <p className="mt-1 text-sm font-medium text-slate-700 dark:text-slate-200">
+                      Angemeldet als <strong>{auth.email}</strong>
+                    </p>
+                    {cloudMessage ? (
+                      <p
+                        role="status"
+                        aria-live="polite"
+                        className={`mt-2 rounded-lg px-2.5 py-1.5 text-xs font-bold ${
+                          cloudMessage.tone === "error"
+                            ? "bg-rose-100 text-rose-900 dark:bg-rose-950/60 dark:text-rose-200"
+                            : "bg-emerald-100 text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200"
+                        }`}
+                      >
+                        {cloudMessage.text}
+                      </p>
+                    ) : null}
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      <button
+                        type="button"
+                        disabled={cloudBusy}
+                        onClick={() => void runCloudSync()}
+                        className="min-h-11 touch-manipulation rounded-lg bg-teal-700 px-3 text-sm font-semibold text-white disabled:opacity-50"
+                      >
+                        {cloudBusy ? "Synchronisiere ..." : "Jetzt synchronisieren"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={cloudBusy}
+                        onClick={() => void handleSignOut()}
+                        className="min-h-11 touch-manipulation rounded-lg border border-slate-400 px-3 text-sm font-semibold text-slate-700 disabled:opacity-50 dark:border-slate-600 dark:text-slate-200"
+                      >
+                        Abmelden
+                      </button>
+                    </div>
+                    <p className="mt-2 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                      Wird beim Start und nach dem Training automatisch gesichert.
+                      Deine Daten bleiben zusätzlich lokal auf dem Gerät.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="mt-1 text-xs font-medium text-slate-600 dark:text-slate-300">
+                      Optional. Ohne Anmeldung funktioniert alles wie bisher – nur
+                      ohne geräteübergreifende Sicherung.
+                    </p>
+
+                    <div className="mt-3 grid gap-2">
+                      <input
+                        type="email"
+                        inputMode="email"
+                        autoComplete="email"
+                        value={authEmail}
+                        onChange={(event) => setAuthEmail(event.target.value)}
+                        placeholder="deine@email.de"
+                        className="min-h-11 rounded-lg border border-slate-400 px-3 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                      />
+                      <button
+                        type="button"
+                        disabled={authBusy || !authEmail.trim()}
+                        onClick={() => void handleSendCode()}
+                        className="min-h-11 touch-manipulation rounded-lg bg-teal-700 px-3 text-sm font-semibold text-white disabled:opacity-50"
+                      >
+                        {authBusy ? "Sende ..." : "Link & Code senden"}
+                      </button>
+
+                      {codeSent ? (
+                        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                          <input
+                            inputMode="numeric"
+                            autoComplete="one-time-code"
+                            value={authCode}
+                            onChange={(event) => setAuthCode(event.target.value)}
+                            placeholder="6-stelliger Code"
+                            className="min-h-11 rounded-lg border border-slate-400 px-3 text-sm tracking-[0.3em] text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                          />
+                          <button
+                            type="button"
+                            disabled={authBusy || !authCode.trim()}
+                            onClick={() => void handleVerifyCode()}
+                            className="min-h-11 touch-manipulation rounded-lg bg-emerald-600 px-3 text-sm font-semibold text-white disabled:opacity-50"
+                          >
+                            Bestätigen
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        Oder mit Konto
+                      </p>
+                      <div className="mt-1.5 flex flex-wrap gap-2">
+                        {(["google", "github"] as const).map((provider) => (
+                          <button
+                            key={`idp-${provider}`}
+                            type="button"
+                            disabled={authBusy}
+                            onClick={() => void handleProviderSignIn(provider)}
+                            className="min-h-11 flex-1 touch-manipulation rounded-lg border border-slate-400 px-3 text-sm font-semibold text-slate-700 disabled:opacity-50 dark:border-slate-600 dark:text-slate-200"
+                          >
+                            {provider === "google" ? "Google" : "GitHub"}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {authMessage ? (
+                      <p
+                        role="status"
+                        aria-live="polite"
+                        className={`mt-3 rounded-lg px-2.5 py-1.5 text-xs font-bold ${
+                          authMessage.tone === "error"
+                            ? "bg-rose-100 text-rose-900 dark:bg-rose-950/60 dark:text-rose-200"
+                            : "bg-emerald-100 text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200"
+                        }`}
+                      >
+                        {authMessage.text}
+                      </p>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            ) : null}
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <label className="flex flex-col gap-1 text-sm font-medium text-slate-900 dark:text-slate-100">
                 Name
