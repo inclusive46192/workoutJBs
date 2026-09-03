@@ -5,9 +5,18 @@
  * - working sets should sit at 1-3 RIR for most of the session
  * - failure is best reserved for the last set of an isolation exercise
  * - dropsets/supersets mainly buy time efficiency at equal hypertrophy
+ *
+ * Failure and dropset are deliberately one kind: both are "take this set past
+ * the normal stopping point", they are logged identically, and splitting them
+ * only added a decision without changing any downstream calculation.
  */
 
-export type SetKind = "warmup" | "working" | "failure" | "superset" | "dropset";
+export type SetKind = "warmup" | "working" | "failure" | "superset";
+
+/** Legacy kinds that must still load from older backups. */
+const legacyKindAliases: Record<string, SetKind> = {
+  dropset: "failure",
+};
 
 export type SetKindMeta = {
   value: SetKind;
@@ -39,10 +48,10 @@ export const setKinds: SetKindMeta[] = [
   },
   {
     value: "failure",
-    label: "Failure",
+    label: "Failure / Dropset",
     short: "F",
     className: "bg-rose-600 text-white",
-    hint: "Bis zum Muskelversagen - am besten nur im letzten Satz.",
+    hint: "Bis zum Muskelversagen, optional mit reduziertem Gewicht weiter.",
     countsAsVolume: true,
   },
   {
@@ -53,18 +62,21 @@ export const setKinds: SetKindMeta[] = [
     hint: "Direkt an die nächste Übung ohne Pause.",
     countsAsVolume: true,
   },
-  {
-    value: "dropset",
-    label: "Dropset",
-    short: "D",
-    className: "bg-cyan-600 text-white",
-    hint: "Gewicht ca. 20% reduzieren und weiter bis zum Versagen.",
-    countsAsVolume: true,
-  },
 ];
 
 export function isSetKind(value: unknown): value is SetKind {
   return setKinds.some((item) => item.value === value);
+}
+
+/** Normalises a stored kind, mapping retired values onto their replacement. */
+export function normalizeSetKind(value: unknown): SetKind | null {
+  if (isSetKind(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value in legacyKindAliases) {
+    return legacyKindAliases[value];
+  }
+  return null;
 }
 
 export function getSetKindMeta(kind: SetKind): SetKindMeta {

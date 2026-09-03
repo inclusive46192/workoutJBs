@@ -1,6 +1,24 @@
 export type JournalCategory = {
   name: string;
   exercises: string[];
+  /**
+   * Exercises that are part of the category but switched off on a fresh
+   * install. Used for the "extended" morning-routine add-ons so the default
+   * flow stays movement-only.
+   */
+  defaultHidden?: string[];
+};
+
+/**
+ * Per-exercise default work duration in seconds. Overrides the category
+ * default (Morning Routine: 60s) for movements that only need a short bout.
+ */
+export const exerciseDefaultSeconds: Record<string, number> = {
+  "Trunk twist": 30,
+  "Dead arms": 30,
+  "Golf swing": 30,
+  "Arm swings": 30,
+  "March slaps": 30,
 };
 
 export const journalCategories: JournalCategory[] = [
@@ -9,11 +27,14 @@ export const journalCategories: JournalCategory[] = [
     exercises: [
       "Lymphatic hops",
       "Body waves",
+      "Cat-Cow",
       "Trunk twist",
       "Dead arms",
       "Golf swing",
       "Arm swings",
       "March slaps",
+      "90/90 Hip Switch",
+      "Knee over Toe",
       "Cossack squat",
       "Deep squat opener",
       "World best stretch opener",
@@ -26,6 +47,8 @@ export const journalCategories: JournalCategory[] = [
       "Kaffee & Wasser vorbereiten",
       "Tagesfokus setzen",
     ],
+    // Daily habits rather than movements: available via the extended routine.
+    defaultHidden: ["Journal Check-in", "Kaffee & Wasser vorbereiten", "Tagesfokus setzen"],
   },
   {
     name: "Yoga",
@@ -51,19 +74,6 @@ export const journalCategories: JournalCategory[] = [
     ],
   },
   {
-    name: "Tabata",
-    exercises: [
-      "Burpee",
-      "Mountain climber",
-      "Jump squat",
-      "High knees",
-      "Skater hop",
-      "Push-up",
-      "Plank jack",
-      "Rest",
-    ],
-  },
-  {
     name: "HIT Workouts",
     exercises: [
       "Air Squat",
@@ -82,24 +92,11 @@ export const journalCategories: JournalCategory[] = [
       "Box Jump",
       "Run 400m",
       "Run 1 mile",
-    ],
-  },
-  {
-    name: "Running/Cardio",
-    exercises: [
-      "Easy run 20 min",
-      "Tempo run 15 min",
-      "Intervals 6x1 min fast",
-      "Hill sprints 8x20s",
-      "Zone 2 walk/jog 30 min",
-      "Bike intervals 10x40/20",
-      "Jump rope 10 min",
-      "Rowing steady 20 min",
-      "Norwegian 4x4 interval",
-      "Aktive Erholung",
-      "Sprint 10s",
-      "Warm-up locker",
-      "Cool-down locker",
+      // Merged in from the former Tabata category.
+      "High knees",
+      "Skater hop",
+      "Plank jack",
+      "Rest",
     ],
   },
   {
@@ -160,6 +157,8 @@ export const exerciseMuscleGroupMap: Record<string, string> = {
   "Hands behind back and head touch elbow plank": "Core",
   "Kneeling diagonal stretch": "Mobility",
   "Leg Swing": "Mobility",
+  "90/90 Hip Switch": "Mobility",
+  "Knee over Toe": "Beine",
   "Journal Check-in": "Mobility",
   "Kaffee & Wasser vorbereiten": "Mobility",
   "Tagesfokus setzen": "Mobility",

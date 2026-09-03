@@ -50,3 +50,371 @@ button {
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Exercise stick-figure animations.
+
+   The rig (see components/exercise-animation.tsx) is segmented: torso, head,
+   upper arm + forearm, thigh + shin. transform-box: view-box makes the px
+   transform-origins below refer to the SVG viewBox coordinates, so each origin
+   sits exactly on the anatomical joint.
+
+   Only movements that genuinely benefit from motion are animated. Static holds
+   and non-movement tasks use `still`.
+--------------------------------------------------------------------------- */
+
+.exercise-figure {
+  width: 100%;
+  height: 100%;
+  color: currentColor;
+}
+
+.exercise-figure g {
+  transform-box: view-box;
+}
+
+/* Joint origins. */
+.exercise-figure .figure-body    { transform-origin: 60px 66px; }
+.exercise-figure .figure-torso   { transform-origin: 60px 66px; }
+.exercise-figure .figure-head    { transform-origin: 60px 22px; }
+.exercise-figure .figure-arm     { transform-origin: 60px 38px; }
+.exercise-figure .figure-fore-left  { transform-origin: 44px 54px; }
+.exercise-figure .figure-fore-right { transform-origin: 76px 54px; }
+.exercise-figure .figure-leg     { transform-origin: 60px 66px; }
+.exercise-figure .figure-shin-left  { transform-origin: 50px 94px; }
+.exercise-figure .figure-shin-right { transform-origin: 70px 94px; }
+
+/* --------------------------------------------------------------- bodyWave
+   Sink into the knees while exhaling, then swing back up with the arms
+   travelling all the way overhead while inhaling. */
+@keyframes bodyWave-body {
+  0%, 100% { transform: translateY(0); }
+  40%      { transform: translateY(14px); }
+}
+@keyframes bodyWave-thigh-l {
+  0%, 100% { transform: rotate(0deg); }
+  40%      { transform: rotate(16deg); }
+}
+@keyframes bodyWave-thigh-r {
+  0%, 100% { transform: rotate(0deg); }
+  40%      { transform: rotate(-16deg); }
+}
+@keyframes bodyWave-shin-l {
+  0%, 100% { transform: rotate(0deg); }
+  40%      { transform: rotate(-20deg); }
+}
+@keyframes bodyWave-shin-r {
+  0%, 100% { transform: rotate(0deg); }
+  40%      { transform: rotate(20deg); }
+}
+/* Arms: down at the bottom, swept overhead at the top of the rise. */
+@keyframes bodyWave-arm-l {
+  0%       { transform: rotate(0deg); }
+  40%      { transform: rotate(24deg); }
+  80%,100% { transform: rotate(-165deg); }
+}
+@keyframes bodyWave-arm-r {
+  0%       { transform: rotate(0deg); }
+  40%      { transform: rotate(-24deg); }
+  80%,100% { transform: rotate(165deg); }
+}
+.exercise-motion-bodyWave .figure-body      { animation: bodyWave-body 4s ease-in-out infinite; }
+.exercise-motion-bodyWave .figure-leg-left  { animation: bodyWave-thigh-l 4s ease-in-out infinite; }
+.exercise-motion-bodyWave .figure-leg-right { animation: bodyWave-thigh-r 4s ease-in-out infinite; }
+.exercise-motion-bodyWave .figure-shin-left { animation: bodyWave-shin-l 4s ease-in-out infinite; }
+.exercise-motion-bodyWave .figure-shin-right{ animation: bodyWave-shin-r 4s ease-in-out infinite; }
+.exercise-motion-bodyWave .figure-arm-left  { animation: bodyWave-arm-l 4s ease-in-out infinite; }
+.exercise-motion-bodyWave .figure-arm-right { animation: bodyWave-arm-r 4s ease-in-out infinite; }
+
+/* ------------------------------------------------------------- trunkTwist
+   Hips and head stay put; only the torso rotates, driven by the arms. */
+@keyframes trunkTwist-torso {
+  0%, 100% { transform: rotate(-15deg); }
+  50%      { transform: rotate(15deg); }
+}
+@keyframes trunkTwist-arm-l {
+  0%, 100% { transform: rotate(-46deg); }
+  50%      { transform: rotate(38deg); }
+}
+@keyframes trunkTwist-arm-r {
+  0%, 100% { transform: rotate(-38deg); }
+  50%      { transform: rotate(46deg); }
+}
+/* Counter-rotate the head so it visibly stays facing forward. */
+@keyframes trunkTwist-head {
+  0%, 100% { transform: rotate(15deg); }
+  50%      { transform: rotate(-15deg); }
+}
+.exercise-motion-trunkTwist .figure-torso    { animation: trunkTwist-torso 2.6s ease-in-out infinite; }
+.exercise-motion-trunkTwist .figure-head     { animation: trunkTwist-head 2.6s ease-in-out infinite; }
+.exercise-motion-trunkTwist .figure-arm-left { animation: trunkTwist-arm-l 2.6s ease-in-out infinite; }
+.exercise-motion-trunkTwist .figure-arm-right{ animation: trunkTwist-arm-r 2.6s ease-in-out infinite; }
+
+/* -------------------------------------------------------------- golfSwing
+   Big rotation through the torso; the trailing heel lifts on each side. */
+@keyframes golfSwing-torso {
+  0%, 100% { transform: rotate(-26deg); }
+  50%      { transform: rotate(26deg); }
+}
+@keyframes golfSwing-arms {
+  0%, 100% { transform: rotate(-58deg); }
+  50%      { transform: rotate(58deg); }
+}
+/* Heel lift = shin rotates back slightly on the unloaded side. */
+@keyframes golfSwing-heel-l {
+  0%, 100% { transform: rotate(0deg); }
+  50%      { transform: rotate(-26deg); }
+}
+@keyframes golfSwing-heel-r {
+  0%, 100% { transform: rotate(26deg); }
+  50%      { transform: rotate(0deg); }
+}
+.exercise-motion-golfSwing .figure-torso     { animation: golfSwing-torso 3s ease-in-out infinite; }
+.exercise-motion-golfSwing .figure-arm       { animation: golfSwing-arms 3s ease-in-out infinite; }
+.exercise-motion-golfSwing .figure-shin-left { animation: golfSwing-heel-l 3s ease-in-out infinite; }
+.exercise-motion-golfSwing .figure-shin-right{ animation: golfSwing-heel-r 3s ease-in-out infinite; }
+
+/* -------------------------------------------------------- armSwingVertical
+   Vertical alternation: one arm up, the other down, then swap. */
+@keyframes armSwingVertical-l {
+  0%, 100% { transform: rotate(-150deg); }
+  50%      { transform: rotate(-6deg); }
+}
+@keyframes armSwingVertical-r {
+  0%, 100% { transform: rotate(6deg); }
+  50%      { transform: rotate(150deg); }
+}
+.exercise-motion-armSwingVertical .figure-arm-left  { animation: armSwingVertical-l 2s ease-in-out infinite; }
+.exercise-motion-armSwingVertical .figure-arm-right { animation: armSwingVertical-r 2s ease-in-out infinite; }
+
+/* ----------------------------------------------------------------- cossack
+   Sink onto one leg with the other extended, then change sides. */
+@keyframes cossack-body {
+  0%, 100% { transform: translate(-14px, 26px); }
+  50%      { transform: translate(14px, 26px); }
+}
+/* Loaded side: thigh out + shin folded back under the hip (deep bend).
+   Free side: leg straight out to the opposite side. */
+@keyframes cossack-leg-l {
+  0%, 100% { transform: rotate(-56deg); }
+  50%      { transform: rotate(-74deg); }
+}
+@keyframes cossack-leg-r {
+  0%, 100% { transform: rotate(74deg); }
+  50%      { transform: rotate(56deg); }
+}
+@keyframes cossack-shin-l {
+  0%, 100% { transform: rotate(116deg); }
+  50%      { transform: rotate(6deg); }
+}
+@keyframes cossack-shin-r {
+  0%, 100% { transform: rotate(-6deg); }
+  50%      { transform: rotate(-116deg); }
+}
+@keyframes cossack-arms {
+  0%, 100% { transform: rotate(-74deg); }
+  50%      { transform: rotate(-74deg); }
+}
+.exercise-motion-cossack .figure-body      { animation: cossack-body 4s ease-in-out infinite; }
+.exercise-motion-cossack .figure-leg-left  { animation: cossack-leg-l 4s ease-in-out infinite; }
+.exercise-motion-cossack .figure-leg-right { animation: cossack-leg-r 4s ease-in-out infinite; }
+.exercise-motion-cossack .figure-shin-left { animation: cossack-shin-l 4s ease-in-out infinite; }
+.exercise-motion-cossack .figure-shin-right{ animation: cossack-shin-r 4s ease-in-out infinite; }
+.exercise-motion-cossack .figure-arm       { animation: cossack-arms 4s ease-in-out infinite; }
+
+/* --------------------------------------------------------------- deepSquat
+   Deep hold with a visible weight shift from side to side. */
+@keyframes deepSquat-body {
+  0%, 100% { transform: translate(-7px, 30px); }
+  50%      { transform: translate(7px, 30px); }
+}
+/* Thigh swings out and up, shin folds back down so the foot stays on the floor. */
+@keyframes deepSquat-leg-l {
+  0%, 100% { transform: rotate(-58deg); }
+  50%      { transform: rotate(-70deg); }
+}
+@keyframes deepSquat-leg-r {
+  0%, 100% { transform: rotate(70deg); }
+  50%      { transform: rotate(58deg); }
+}
+@keyframes deepSquat-shin-l {
+  0%, 100% { transform: rotate(112deg); }
+  50%      { transform: rotate(124deg); }
+}
+@keyframes deepSquat-shin-r {
+  0%, 100% { transform: rotate(-124deg); }
+  50%      { transform: rotate(-112deg); }
+}
+/* Elbows tucked inside the knees, hands together at the chest. */
+@keyframes deepSquat-arm-l { 0%,100% { transform: rotate(-88deg); } }
+@keyframes deepSquat-arm-r { 0%,100% { transform: rotate(88deg); } }
+.exercise-motion-deepSquat .figure-body      { animation: deepSquat-body 4.4s ease-in-out infinite; }
+.exercise-motion-deepSquat .figure-leg-left  { animation: deepSquat-leg-l 4.4s ease-in-out infinite; }
+.exercise-motion-deepSquat .figure-leg-right { animation: deepSquat-leg-r 4.4s ease-in-out infinite; }
+.exercise-motion-deepSquat .figure-shin-left { animation: deepSquat-shin-l 4.4s ease-in-out infinite; }
+.exercise-motion-deepSquat .figure-shin-right{ animation: deepSquat-shin-r 4.4s ease-in-out infinite; }
+.exercise-motion-deepSquat .figure-arm-left  { animation: deepSquat-arm-l 4.4s ease-in-out infinite; }
+.exercise-motion-deepSquat .figure-arm-right { animation: deepSquat-arm-r 4.4s ease-in-out infinite; }
+
+/* ------------------------------------------------------------ tableTopToe
+   Quadruped position; opposite hand and foot extend, meet under the body,
+   then the other side takes its turn. */
+/* Body rotated so the torso lies horizontal (head to the left, hips right).
+   Arms and legs are then swung to point at the floor, giving a quadruped. */
+.exercise-motion-tableTopToe .figure-body {
+  transform: rotate(-90deg) translate(-26px, 4px) scale(0.86);
+}
+.exercise-motion-tableTopToe .figure-arm-left  { --rest: 45deg; }
+.exercise-motion-tableTopToe .figure-fore-left,
+.exercise-motion-tableTopToe .figure-fore-right { transform: rotate(0deg); }
+/* +45deg puts the left arm straight at the floor, +135deg the right arm.
+   Legs: -45deg / -135deg does the same for the thighs. */
+@keyframes tableTopToe-arm-a {
+  0%       { transform: rotate(45deg); }
+  25%      { transform: rotate(-38deg); }
+  50%,100% { transform: rotate(45deg); }
+}
+@keyframes tableTopToe-leg-a {
+  0%       { transform: rotate(-135deg); }
+  25%      { transform: rotate(-58deg); }
+  50%,100% { transform: rotate(-135deg); }
+}
+@keyframes tableTopToe-arm-b {
+  0%,50%   { transform: rotate(135deg); }
+  75%      { transform: rotate(-142deg); }
+  100%     { transform: rotate(135deg); }
+}
+@keyframes tableTopToe-leg-b {
+  0%,50%   { transform: rotate(-45deg); }
+  75%      { transform: rotate(38deg); }
+  100%     { transform: rotate(-45deg); }
+}
+.exercise-motion-tableTopToe .figure-arm-left  { animation: tableTopToe-arm-a 5s ease-in-out infinite; }
+.exercise-motion-tableTopToe .figure-leg-right { animation: tableTopToe-leg-a 5s ease-in-out infinite; }
+.exercise-motion-tableTopToe .figure-arm-right { animation: tableTopToe-arm-b 5s ease-in-out infinite; }
+.exercise-motion-tableTopToe .figure-leg-left  { animation: tableTopToe-leg-b 5s ease-in-out infinite; }
+
+/* -------------------------------------------------------- plankHandsBehind
+   Forearm plank; one hand travels to the low back, then to the head, then
+   returns to the forearm support. Sides alternate. */
+/* Torso horizontal, legs extended straight back, forearms on the floor. */
+.exercise-motion-plankHandsBehind .figure-body {
+  transform: rotate(-90deg) translate(-24px, 2px) scale(0.84);
+}
+/* Support arm: forearm folded flat on the floor. */
+/* Upper arm drops to the floor (+45deg), forearm turns forward under the chest. */
+@keyframes plankHandsBehind-support {
+  0%, 100% { transform: rotate(45deg); }
+}
+@keyframes plankHandsBehind-support-fore {
+  0%, 100% { transform: rotate(111deg); }
+}
+/* Working arm: forearm down -> behind the back -> to the head -> down. */
+/* Working arm: floor -> hand to the low back -> hand to the head -> floor. */
+@keyframes plankHandsBehind-work {
+  0%, 12%  { transform: rotate(135deg); }
+  38%      { transform: rotate(206deg); }
+  68%      { transform: rotate(74deg); }
+  92%,100% { transform: rotate(135deg); }
+}
+@keyframes plankHandsBehind-work-fore {
+  0%, 12%  { transform: rotate(21deg); }
+  38%      { transform: rotate(-42deg); }
+  68%      { transform: rotate(66deg); }
+  92%,100% { transform: rotate(21deg); }
+}
+.exercise-motion-plankHandsBehind .figure-arm-left   { animation: plankHandsBehind-support 5.6s ease-in-out infinite; }
+.exercise-motion-plankHandsBehind .figure-fore-left  { animation: plankHandsBehind-support-fore 5.6s ease-in-out infinite; }
+.exercise-motion-plankHandsBehind .figure-arm-right  { animation: plankHandsBehind-work 5.6s ease-in-out infinite; }
+.exercise-motion-plankHandsBehind .figure-fore-right { animation: plankHandsBehind-work-fore 5.6s ease-in-out infinite; }
+/* Legs extended straight back in line with the torso. */
+.exercise-motion-plankHandsBehind .figure-leg-left   { transform: rotate(20deg); }
+.exercise-motion-plankHandsBehind .figure-leg-right  { transform: rotate(-20deg); }
+.exercise-motion-plankHandsBehind .figure-shin-left  { transform: rotate(-14deg); }
+.exercise-motion-plankHandsBehind .figure-shin-right { transform: rotate(14deg); }
+
+/* --------------------------------------------------- kneelingHeelReach
+   Kneeling, reaching back and down toward the heel; sides alternate. */
+@keyframes kneelingHeelReach-body {
+  0%, 45%  { transform: translateY(24px) rotate(-10deg); }
+  50%, 95% { transform: translateY(24px) rotate(10deg) scaleX(-1); }
+  100%     { transform: translateY(24px) rotate(-10deg); }
+}
+/* Both legs kneeling: thigh down, shin folded back. */
+@keyframes kneelingHeelReach-thigh-l { 0%,100% { transform: rotate(-14deg); } }
+@keyframes kneelingHeelReach-thigh-r { 0%,100% { transform: rotate(14deg); } }
+@keyframes kneelingHeelReach-shin-l  { 0%,100% { transform: rotate(84deg); } }
+@keyframes kneelingHeelReach-shin-r  { 0%,100% { transform: rotate(-84deg); } }
+/* Reaching arm sweeps back toward the heel. */
+@keyframes kneelingHeelReach-arm-reach {
+  0%       { transform: rotate(-20deg); }
+  40%      { transform: rotate(58deg); }
+  80%,100% { transform: rotate(-20deg); }
+}
+@keyframes kneelingHeelReach-arm-up {
+  0%       { transform: rotate(20deg); }
+  40%      { transform: rotate(-128deg); }
+  80%,100% { transform: rotate(20deg); }
+}
+.exercise-motion-kneelingHeelReach .figure-body      { animation: kneelingHeelReach-body 6s ease-in-out infinite; }
+.exercise-motion-kneelingHeelReach .figure-leg-left  { animation: kneelingHeelReach-thigh-l 6s ease-in-out infinite; }
+.exercise-motion-kneelingHeelReach .figure-leg-right { animation: kneelingHeelReach-thigh-r 6s ease-in-out infinite; }
+.exercise-motion-kneelingHeelReach .figure-shin-left { animation: kneelingHeelReach-shin-l 6s ease-in-out infinite; }
+.exercise-motion-kneelingHeelReach .figure-shin-right{ animation: kneelingHeelReach-shin-r 6s ease-in-out infinite; }
+.exercise-motion-kneelingHeelReach .figure-arm-right { animation: kneelingHeelReach-arm-reach 6s ease-in-out infinite; }
+.exercise-motion-kneelingHeelReach .figure-arm-left  { animation: kneelingHeelReach-arm-up 6s ease-in-out infinite; }
+
+/* ------------------------------------------------------------------- hop
+   Loose bouncing on the balls of the feet. */
+@keyframes hop-body {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  35%      { transform: translateY(4px) scaleY(0.95); }
+  60%      { transform: translateY(-9px) scaleY(1.03); }
+}
+.exercise-motion-hop .figure-body { animation: hop-body 0.9s ease-in-out infinite; }
+
+/* --------------------------------------------------------------- deadArms
+   Torso turns minimally; the arms hang and trail completely passively. */
+@keyframes deadArms-torso {
+  0%, 100% { transform: rotate(-9deg); }
+  50%      { transform: rotate(9deg); }
+}
+@keyframes deadArms-arm-l {
+  0%, 100% { transform: rotate(20deg); }
+  55%      { transform: rotate(-20deg); }
+}
+@keyframes deadArms-arm-r {
+  0%, 100% { transform: rotate(-20deg); }
+  55%      { transform: rotate(20deg); }
+}
+.exercise-motion-deadArms .figure-torso     { animation: deadArms-torso 2.6s ease-in-out infinite; }
+.exercise-motion-deadArms .figure-arm-left  { animation: deadArms-arm-l 2.6s ease-in-out infinite; }
+.exercise-motion-deadArms .figure-arm-right { animation: deadArms-arm-r 2.6s ease-in-out infinite; }
+
+/* ----------------------------------------------------------------- march
+   Alternating knee lift with the opposite hand slapping the thigh. */
+@keyframes march-thigh-up   { 0%,100% { transform: rotate(0deg); }  50% { transform: rotate(-52deg); } }
+@keyframes march-thigh-down { 0%,100% { transform: rotate(-52deg); } 50% { transform: rotate(0deg); } }
+@keyframes march-shin-up    { 0%,100% { transform: rotate(0deg); }  50% { transform: rotate(44deg); } }
+@keyframes march-shin-down  { 0%,100% { transform: rotate(44deg); } 50% { transform: rotate(0deg); } }
+@keyframes march-arm-a      { 0%,100% { transform: rotate(10deg); } 50% { transform: rotate(-46deg); } }
+@keyframes march-arm-b      { 0%,100% { transform: rotate(-46deg); } 50% { transform: rotate(10deg); } }
+.exercise-motion-march .figure-leg-left  { animation: march-thigh-up 1.1s ease-in-out infinite; }
+.exercise-motion-march .figure-shin-left { animation: march-shin-up 1.1s ease-in-out infinite; }
+.exercise-motion-march .figure-leg-right { animation: march-thigh-down 1.1s ease-in-out infinite; }
+.exercise-motion-march .figure-shin-right{ animation: march-shin-down 1.1s ease-in-out infinite; }
+.exercise-motion-march .figure-arm-right { animation: march-arm-a 1.1s ease-in-out infinite; }
+.exercise-motion-march .figure-arm-left  { animation: march-arm-b 1.1s ease-in-out infinite; }
+
+/* -------------------------------------------------------------- legSwing
+   Standing on one leg, the free leg swings forward and back. */
+@keyframes legSwing-free {
+  0%, 100% { transform: rotate(34deg); }
+  50%      { transform: rotate(-40deg); }
+}
+.exercise-motion-legSwing .figure-leg-right { animation: legSwing-free 2s ease-in-out infinite; }
+.exercise-motion-legSwing .figure-arm-left  { transform: rotate(-64deg); }
+
+/* ------------------------------------------------------------------ still
+   Holds and non-movement tasks: no animation at all. */
+.exercise-motion-still * { animation: none; }

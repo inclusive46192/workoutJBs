@@ -2,9 +2,24 @@
 
 import Image from "next/image";
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
-import { exerciseMuscleGroupMap, type JournalCategory } from "@/lib/exercises";
+import {
+  exerciseDefaultSeconds,
+  exerciseMuscleGroupMap,
+  type JournalCategory,
+} from "@/lib/exercises";
+import { getExerciseGuide } from "@/lib/exercise-guides";
+import {
+  buildBackupBundle,
+  markExported,
+  readLocalHistory,
+  restoreBackupBundle,
+  touchRevision,
+  type LocalHistory,
+  type RestoreSummary,
+} from "@/lib/backup";
+import { ExerciseAnimation } from "@/components/exercise-animation";
 import { getCategoryProfile } from "@/lib/category-profiles";
-import { isSetKind, setKinds, type SetKind } from "@/lib/set-types";
+import { normalizeSetKind, setKinds, type SetKind } from "@/lib/set-types";
 import { presetRoutines, type PresetRoutine } from "@/lib/preset-routines";
 import {
   collectPersonalRecords,
@@ -31,6 +46,7 @@ import {
   playRestStart,
   playSessionComplete,
   playWorkStart,
+  releaseAudio,
   schedulePhaseCues,
   setSignalsEnabled,
   unlockAudio,
@@ -58,6 +74,12 @@ type EntryState = {
   completedSets: number;
   setLogs: SetLog[];
   reps: string;
+  /**
+   * Prescription from a preset, e.g. "8-12". Kept separate from `reps` because
+   * the logging field is numeric: assigning a range there is rejected by the
+   * browser and the guidance would be lost. Shown as a placeholder instead.
+   */
+  targetReps?: string;
   weightKg: string;
   durationMinutes: string;
   targetMinutes: string;
@@ -97,6 +119,10 @@ type WorkoutBuilderTemplate = {
   category: string;
   entries: EntryState[];
   exerciseCustomSeconds: ExerciseSecondMap;
+  /** Interval timing the routine was designed for (e.g. Tabata 20/10 x8). */
+  intervals?: { workSeconds: number; restSeconds: number; rounds: number };
+  /** ISO timestamp of the last time this template was loaded. */
+  lastUsedAt?: string;
 };
 
 type QuickLoadType = "favorite" | "builder" | "hit-set" | "bb-plan";
@@ -157,6 +183,11 @@ const intervalSettingsStorageKey = "momentum-interval:settings:v1";
 const signalPrefsStorageKey = "momentum-signals:prefs:v1";
 const lastSetValuesStorageKey = "momentum-sets:last-values:v1";
 const goalsStorageKey = "momentum-goals:v1";
+const restorePromptDismissedKey = "momentum-sync:restore-prompt-dismissed:v1";
+/** Upper bound for sets seeded from a preset or default. */
+const maxDefaultSets = 3;
+/** Sentinel for goals that are not scoped to a single category. */
+const allCategoriesOption = "Alle Kategorien";
 const bodyWeightStorageKeyPrefix = "momentum-bodyweight:";
 const defaultDashboardGraphConfig: Record<DashboardGraphKey, boolean> = {
   weight: true,
@@ -188,8 +219,16 @@ const muscleGroupLookup: Record<string, BuilderMuscleGroup> = {
 };
 const journalArchiveStorageKey = "momentum-journal:archive:v1";
 
+/**
+ * Local calendar date key. Must NOT use toISOString(): that converts to UTC, so
+ * east of Greenwich an early-morning session (the main use case here) would be
+ * filed under the previous day.
+ */
 function getDateKeyFromDate(date: Date) {
-  return date.toISOString().slice(0, 10);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function getTodayDateKey() {
@@ -257,6 +296,35 @@ function formatDurationCompact(totalSeconds: number): string {
   return `${minutes}m`;
 }
 
+/** Relative day label for "last used" hints, e.g. "heute" / "vor 3 Tagen". */
+function formatLastUsed(iso: string): string {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) {
+    return "";
+  }
+  const startOfDay = (date: Date) =>
+    new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const days = Math.round((startOfDay(new Date()) - startOfDay(then)) / 86_400_000);
+  if (days <= 0) return "heute";
+  if (days === 1) return "gestern";
+  if (days < 7) return `vor ${days} Tagen`;
+  return then.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+}
+
+/** Human summary of a merge, so the user can see nothing was lost. */
+function formatRestoreSummary(summary: RestoreSummary): string {
+  const parts: string[] = [];
+  if (summary.daysAdded > 0) parts.push(`${summary.daysAdded} Tage ergänzt`);
+  if (summary.daysUpdated > 0) parts.push(`${summary.daysUpdated} aktualisiert`);
+  if (summary.daysKept > 0) parts.push(`${summary.daysKept} lokal behalten`);
+  const range =
+    summary.rangeStart && summary.rangeEnd
+      ? ` · Historie ${summary.rangeStart} bis ${summary.rangeEnd}`
+      : "";
+  const detail = parts.length > 0 ? parts.join(", ") : "keine neuen Tage";
+  return `${detail}${range} - App wird neu geladen ...`;
+}
+
 function localStorageKey(dateKey: string, category: string): string {
   return `momentum-lite:${dateKey}:${category}`;
 }
@@ -304,7 +372,7 @@ function normalizeSetLogs(rawSetLogs: unknown, targetSetsRaw: string): SetLog[] 
     const reps = raw?.reps ?? "";
     const weightKg = raw?.weightKg ?? "";
     const done = Boolean(raw?.done && reps.trim() && weightKg.trim());
-    const kind = isSetKind(raw?.kind) ? raw.kind : "working";
+    const kind = normalizeSetKind(raw?.kind) ?? "working";
     return { reps, weightKg, done, kind };
   });
 }
@@ -336,6 +404,7 @@ function normalizeEntries(entries: Partial<EntryState>[], exercises: string[]): 
       completedSets: row?.completedSets ?? 0,
       setLogs: normalizeSetLogs(row?.setLogs, row?.sets ?? ""),
       reps: row?.reps ?? "",
+      targetReps: row?.targetReps,
       weightKg: row?.weightKg ?? "",
       durationMinutes: row?.durationMinutes ?? "",
       targetMinutes: row?.targetMinutes ?? "",
@@ -350,7 +419,9 @@ function getExerciseTargetSeconds(
   exercise: string,
   fallbackSeconds = 60,
 ): number {
-  return customSeconds[exercise] ?? fallbackSeconds;
+  // Per-exercise defaults (e.g. the 30s mobility drills) win over the category
+  // default, but an explicit user override still wins over both.
+  return customSeconds[exercise] ?? exerciseDefaultSeconds[exercise] ?? fallbackSeconds;
 }
 
 function createEntryTemplate(exercise: string, defaults?: Partial<EntryState>): EntryState {
@@ -491,6 +562,8 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   const [newExerciseName, setNewExerciseName] = useState("");
   const [bodyWeightKg, setBodyWeightKg] = useState("");
   const [dashboardRange, setDashboardRange] = useState<"7" | "30" | "90" | "all">("7");
+  /** Bumped whenever stored day data changes so the dashboard memo recomputes. */
+  const [statsVersion, setStatsVersion] = useState(0);
   const [exerciseDurationFilter, setExerciseDurationFilter] = useState<string>("all");
   const [dashboardGraphConfig, setDashboardGraphConfig] = useState<Record<DashboardGraphKey, boolean>>(() => {
     if (typeof window === "undefined") {
@@ -519,7 +592,10 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   const [phaseRound, setPhaseRound] = useState(1);
   const [phaseTotalSeconds, setPhaseTotalSeconds] = useState(0);
   const [showFocusOverlay, setShowFocusOverlay] = useState(true);
-  const [tabataRounds, setTabataRounds] = useState(8);
+  const [showExerciseGuide, setShowExerciseGuide] = useState(true);
+  /** Snapshot of stored history, drives the startup prompt and export nudge. */
+  const [historyInfo, setHistoryInfo] = useState<LocalHistory | null>(null);
+  const [showRestorePrompt, setShowRestorePrompt] = useState(false);
   const [hitWorkSeconds, setHitWorkSeconds] = useState(40);
   const [hitRestSeconds, setHitRestSeconds] = useState(20);
   const [prepSecondsSetting, setPrepSecondsSetting] = useState(10);
@@ -538,6 +614,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     targetReps: string;
     targetDate: string;
     planWhen: string;
+    category: string;
   }>({
     type: "strength",
     subject: "",
@@ -545,6 +622,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     targetReps: "",
     targetDate: "",
     planWhen: "",
+    category: allCategoriesOption,
   });
   const [goalManualDraft, setGoalManualDraft] = useState<Record<string, string>>({});
   const cancelCuesRef = useRef<() => void>(() => {});
@@ -590,8 +668,12 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       const entries = preset.exercises
         .filter((item) => knownExercises.has(item.exercise))
         .map((item) => {
-          const warmups = item.warmupSets ?? 0;
-          const totalSets = warmups + Math.max(1, item.sets);
+          // Never seed more than three rows per exercise: longer prescriptions
+          // are unwieldy to log on a phone. Working sets take priority over
+          // warmups, and the user can still add sets manually.
+          const workingSets = Math.min(Math.max(1, item.sets), maxDefaultSets);
+          const warmups = Math.min(item.warmupSets ?? 0, maxDefaultSets - workingSets);
+          const totalSets = warmups + workingSets;
           const setLogs: SetLog[] = Array.from({ length: totalSets }, (_, index) => ({
             reps: "",
             weightKg: "",
@@ -606,7 +688,9 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
           return createEntryTemplate(item.exercise, {
             sets: String(totalSets),
             setLogs,
-            reps: item.reps,
+            // Numeric field stays empty; the prescription lives in targetReps.
+            reps: /^\d+$/.test(item.reps) ? item.reps : "",
+            targetReps: item.reps,
             targetMinutes: item.restSeconds
               ? String(Math.round(item.restSeconds / 60))
               : "",
@@ -618,6 +702,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
         name: preset.name,
         entries,
         exerciseCustomSeconds: customSeconds,
+        intervals: preset.intervals,
       };
     };
 
@@ -636,6 +721,33 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   useEffect(() => {
     setHasMounted(true);
   }, []);
+
+  /**
+   * Startup restore prompt. Only asked when this install has no logged history
+   * yet - a fresh install, a cleared Safari storage or a new device. That is
+   * exactly the moment where continuing from a backup keeps the history
+   * gap-free; asking on every launch would just train the user to dismiss it.
+   */
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const history = readLocalHistory();
+    setHistoryInfo(history);
+
+    const dismissed = localStorage.getItem(restorePromptDismissedKey) === "1";
+    if (history.loggedDays === 0 && !dismissed) {
+      setShowRestorePrompt(true);
+    }
+  }, []);
+
+  // Keep the history/export hints in sync as sessions are logged.
+  useEffect(() => {
+    if (typeof window === "undefined" || statsVersion === 0) {
+      return;
+    }
+    setHistoryInfo(readLocalHistory());
+  }, [statsVersion]);
 
   // Hydrate the list-shaping stores after mount to avoid an SSR mismatch.
   useEffect(() => {
@@ -657,9 +769,25 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     const custom = readMap(customExercisesStorageKey);
     if (custom) setCustomExercisesByCategory(custom);
     const hidden = readMap(hiddenExercisesStorageKey);
-    if (hidden) setHiddenExercisesByCategory(hidden);
+    if (hidden) {
+      setHiddenExercisesByCategory(hidden);
+    } else {
+      // First run: switch off the extended add-ons so the default routine is
+      // movement only. Users can re-enable them in the builder at any time.
+      const seeded: Record<string, string[]> = {};
+      for (const category of categories) {
+        if (category.defaultHidden?.length) {
+          seeded[category.name] = [...category.defaultHidden];
+        }
+      }
+      if (Object.keys(seeded).length > 0) {
+        setHiddenExercisesByCategory(seeded);
+        localStorage.setItem(hiddenExercisesStorageKey, JSON.stringify(seeded));
+      }
+    }
     const order = readMap(exerciseOrderStorageKey);
     if (order) setExerciseOrderByCategory(order);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -796,14 +924,14 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     if (rawIntervals) {
       try {
         const parsed = JSON.parse(rawIntervals) as {
-          tabataRounds?: number;
           hitWorkSeconds?: number;
           hitRestSeconds?: number;
+          hitRounds?: number;
           prepSeconds?: number;
         };
-        if (parsed.tabataRounds) setTabataRounds(parsed.tabataRounds);
         if (parsed.hitWorkSeconds) setHitWorkSeconds(parsed.hitWorkSeconds);
         if (parsed.hitRestSeconds !== undefined) setHitRestSeconds(parsed.hitRestSeconds);
+        if (parsed.hitRounds) setHitTargetRounds(parsed.hitRounds);
         if (parsed.prepSeconds !== undefined) setPrepSecondsSetting(parsed.prepSeconds);
       } catch {
         // ignore malformed settings
@@ -854,13 +982,13 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     localStorage.setItem(
       intervalSettingsStorageKey,
       JSON.stringify({
-        tabataRounds,
         hitWorkSeconds,
         hitRestSeconds,
+        hitRounds: hitTargetRounds,
         prepSeconds: prepSecondsSetting,
       }),
     );
-  }, [hitRestSeconds, hitWorkSeconds, prepSecondsSetting, tabataRounds]);
+  }, [hitRestSeconds, hitTargetRounds, hitWorkSeconds, prepSecondsSetting]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -932,6 +1060,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
         moodVolumeCorrelation: null as number | null,
         moodPairedCount: 0,
         doneDayKeys: [] as string[],
+        doneDaysByCategory: new Map<string, Set<string>>(),
         totalTrackedSeconds: 0,
         totalWorkoutSeconds: 0,
         avgWorkoutSeconds: 0,
@@ -960,6 +1089,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     const monthMeta = getMonthMeta(selectedDate);
     const counts = new Map<string, number>();
     const dayDone = new Map<string, boolean>();
+    const doneDaysByCategory = new Map<string, Set<string>>();
     const exerciseCounts = new Map<string, number>();
     const exerciseDurations = new Map<string, number>();
     const durationByDay = new Map<string, number>();
@@ -1042,6 +1172,11 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
         if (completedEntries.length > 0) {
           totalSessions += 1;
           dayDone.set(dateKey, true);
+          // Per-category done days so a goal like "10 days morning routine"
+          // is not satisfied by an unrelated bodybuilding session.
+          const categorySet = doneDaysByCategory.get(categoryName) ?? new Set<string>();
+          categorySet.add(dateKey);
+          doneDaysByCategory.set(categoryName, categorySet);
         }
         totalCompleted += completedEntries.length;
         totalTrackedSeconds += trackedSecondsFromEntries;
@@ -1160,6 +1295,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       doneDayKeys: Array.from(dayDone.entries())
         .filter(([, done]) => done)
         .map(([key]) => key),
+      doneDaysByCategory,
       totalTrackedSeconds,
       totalWorkoutSeconds,
       avgWorkoutSeconds:
@@ -1181,8 +1317,9 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     };
     // bodyWeightKg is included so the weight chart refreshes right after the
     // value is persisted to localStorage, which this memo reads from.
+    // statsVersion does the same for saved workout days.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bodyWeightKg, dashboardRange, selectedDate]);
+  }, [bodyWeightKg, dashboardRange, selectedDate, statsVersion]);
 
   const toggleDashboardGraph = (key: DashboardGraphKey) => {
     setDashboardGraphConfig((current) => ({
@@ -1226,6 +1363,13 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   useEffect(() => {
     activeExercisesRef.current = activeExercises;
   }, [activeExercises]);
+
+  // Refs feed the debounced autosave without making the timer restart on every
+  // clock tick (overallLiveSeconds changes once per second).
+  const loadedKeyRef = useRef<string>("");
+  const entriesRef = useRef<EntryState[]>(entries);
+  const reflectionRef = useRef<ReflectionState>(reflection);
+  const overallSecondsRef = useRef<number>(0);
 
   useEffect(() => {
     const currentOrder = exerciseOrderByCategory[selectedCategory] ?? [];
@@ -1300,14 +1444,13 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   // Every interval category is driven by the focus overlay, so they all use the
   // compact step list instead of the per-exercise logging cards.
   const isFlowCategory = isIntervalCategory;
-  const isTabata = selectedCategory === "Tabata";
   const isHitWorkout = selectedCategory === "HIT Workouts";
   const isBodybuilding = isSetsCategory;
   const flowLabel = categoryProfile.label;
 
   const intervalSettings = useMemo<IntervalSettings>(() => {
     // User-tunable categories override the profile defaults.
-    const rounds = isTabata ? tabataRounds : isHitWorkout ? hitTargetRounds : categoryProfile.rounds;
+    const rounds = isHitWorkout ? hitTargetRounds : categoryProfile.rounds;
     const work = isHitWorkout ? hitWorkSeconds : categoryProfile.workSeconds;
     const rest = isHitWorkout ? hitRestSeconds : categoryProfile.restSeconds;
     const prep = categoryProfile.configurable
@@ -1327,9 +1470,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     hitTargetRounds,
     hitWorkSeconds,
     isHitWorkout,
-    isTabata,
     prepSecondsSetting,
-    tabataRounds,
   ]);
 
   const intervalRunning = intervalPhase === "prep" || intervalPhase === "work" || intervalPhase === "rest";
@@ -1352,11 +1493,21 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     overallBaseSeconds +
     (overallStartedAtMs ? Math.floor((nowMs - overallStartedAtMs) / 1000) : 0);
 
+  entriesRef.current = entries;
+  reflectionRef.current = reflection;
+  overallSecondsRef.current = overallLiveSeconds;
+
   useEffect(() => {
     const loadLite = async () => {
       const key = localStorageKey(selectedDate, selectedCategory);
       const raw = localStorage.getItem(key);
       const exercises = activeExercisesRef.current;
+
+      // Marks which day/category the entries in state belong to. The autosave
+      // effect below refuses to write until this matches the current selection,
+      // otherwise switching day would flush the previous day's entries into the
+      // newly selected key.
+      loadedKeyRef.current = key;
 
       if (!raw) {
         setEntries(buildDefaultEntries(exercises));
@@ -1389,6 +1540,46 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     // Deliberately not keyed on activeExercises: loading a routine changes the
     // active list and must not wipe the entries that routine just supplied.
   }, [selectedCategory, selectedDate]);
+
+  /**
+   * Autosave. Without this a finished workout only counted if the user happened
+   * to press a save button, so goals and streaks stayed empty. Writing on every
+   * change also keeps the dashboard honest after a crash or app switch.
+   */
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const key = localStorageKey(selectedDate, selectedCategory);
+    if (loadedKeyRef.current !== key) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      const payload: LiteDayPayload = {
+        entries: entriesRef.current,
+        reflection: reflectionRef.current,
+        overallSeconds: overallSecondsRef.current,
+      };
+      localStorage.setItem(key, JSON.stringify(payload));
+      touchRevision(key);
+      // Tells the dashboard memo that stored data changed.
+      setStatsVersion((current) => current + 1);
+
+      const reflectionText = reflectionRef.current.text.trim();
+      if (reflectionText) {
+        appendJournalArchiveRef.current({
+          dateKey: selectedDate,
+          category: selectedCategory,
+          mood: reflectionRef.current.flowScore
+            ? `Score ${reflectionRef.current.flowScore}`
+            : "Score -",
+          text: reflectionText,
+        });
+      }
+    }, 600);
+
+    return () => window.clearTimeout(timeout);
+  }, [entries, reflection, selectedCategory, selectedDate]);
 
   // Newly activated exercises get a default entry without touching existing logs.
   useEffect(() => {
@@ -1833,6 +2024,9 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     setIntervalPhase("idle");
     setPhaseEndsAtMs(null);
     setPhaseExercise(null);
+    // Hands the iOS audio session back so the user's music resumes and the
+    // lock-screen transport controls disappear.
+    releaseAudio();
     };
 
   const addCustomExercise = (nameOverride?: string) => {
@@ -1892,30 +2086,56 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     setEntries((current) => current.filter((entry) => entry.exercise !== exercise));
   };
 
+  /**
+   * Precise reason why "Done & Next" cannot complete this exercise yet.
+   * Returned as a sentence so it can be shown next to the button *before* the
+   * user taps it, instead of only as an error afterwards.
+   */
+  const describeBodybuildingBlocker = (entry: EntryState | undefined): string | null => {
+    if (!entry) {
+      return null;
+    }
+    const requiredSets = Math.max(0, Number.parseInt(entry.sets || "0", 10) || 0);
+    if (requiredSets === 0) {
+      return "Lege zuerst eine Satzzahl größer als 0 fest.";
+    }
+    if (entry.setLogs.length !== requiredSets) {
+      return `Satzzahl (${requiredSets}) und angelegte Sätze (${entry.setLogs.length}) stimmen nicht überein.`;
+    }
+
+    const missing: string[] = [];
+    entry.setLogs.forEach((setLog, index) => {
+      const reps = Number.parseInt(setLog.reps || "", 10);
+      const weight = Number.parseFloat(setLog.weightKg || "");
+      const gaps: string[] = [];
+      if (!Number.isFinite(reps) || reps <= 0) gaps.push("Reps");
+      if (!Number.isFinite(weight) || weight <= 0) gaps.push("Gewicht");
+      if (!setLog.done) gaps.push("DONE");
+      if (gaps.length > 0) {
+        missing.push(`Satz ${index + 1}: ${gaps.join(" + ")}`);
+      }
+    });
+
+    if (missing.length === 0) {
+      return null;
+    }
+    // Keep it short on mobile: name the first two gaps explicitly.
+    const shown = missing.slice(0, 2).join(" · ");
+    const rest = missing.length > 2 ? ` · +${missing.length - 2} weitere` : "";
+    return `Noch offen – ${shown}${rest}`;
+  };
+
   const completeBodybuildingAndNext = (exercise: string): boolean => {
     const currentEntry = visibleEntries.find((entry) => entry.exercise === exercise);
     if (!currentEntry) {
       return false;
     }
-    const targetSets = currentEntry.sets ?? "0";
-    const requiredSets = Math.max(0, Number.parseInt(targetSets || "0", 10) || 0);
-    if (requiredSets === 0) {
-      setErrorText("Bitte zuerst eine Satzzahl > 0 festlegen.");
+    const blocker = describeBodybuildingBlocker(currentEntry);
+    if (blocker) {
+      setErrorText(blocker);
       return false;
     }
-    if (currentEntry.setLogs.length !== requiredSets) {
-      setErrorText("Satzzahl und Satz-Logs stimmen noch nicht überein.");
-      return false;
-    }
-    const missingSetData = currentEntry.setLogs.some((setLog) => {
-      const repsValue = Number.parseInt(setLog.reps || "", 10);
-      const weightValue = Number.parseFloat(setLog.weightKg || "");
-      return !setLog.done || Number.isNaN(repsValue) || repsValue <= 0 || Number.isNaN(weightValue) || weightValue <= 0;
-    });
-    if (missingSetData) {
-      setErrorText("Bitte jeden Satz mit Reps + Gewicht ausfüllen und DONE abhaken.");
-      return false;
-    }
+    const requiredSets = Math.max(0, Number.parseInt(currentEntry.sets || "0", 10) || 0);
 
     handleEntryChange(exercise, {
       completed: true,
@@ -2068,6 +2288,39 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     setErrorText("");
   };
 
+  /**
+   * Applies a template's exercise sequence as the category order. Without this
+   * a loaded routine kept whatever order was stored before, so exercises
+   * appeared to be appended at the bottom instead of following the routine.
+   */
+  const applyExerciseOrderFromEntries = (entries: EntryState[]) => {
+    const fromTemplate = entries.map((entry) => entry.exercise);
+    setExerciseOrderByCategory((current) => {
+      const previous = current[selectedCategory] ?? [];
+      const templateSet = new Set(fromTemplate);
+      // Exercises not in the routine keep their relative order behind it.
+      const remainder = [...previous, ...allExercisesForCategory].filter(
+        (exercise, index, list) =>
+          !templateSet.has(exercise) && list.indexOf(exercise) === index,
+      );
+      const next = { ...current, [selectedCategory]: [...fromTemplate, ...remainder] };
+      localStorage.setItem(exerciseOrderStorageKey, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const markTemplateUsed = (category: string, name: string) => {
+    setWorkoutBuilderTemplates((current) => {
+      const categoryTemplates = current[category] ?? [];
+      const nextCategory = categoryTemplates.map((item) =>
+        item.name === name ? { ...item, lastUsedAt: new Date().toISOString() } : item,
+      );
+      const next = { ...current, [category]: nextCategory };
+      localStorage.setItem(workoutBuilderTemplatesStorageKey, JSON.stringify(next));
+      return next;
+    });
+  };
+
   const loadWorkoutBuilderTemplate = (nameOverride?: string) => {
     const targetName = nameOverride ?? selectedWorkoutBuilderName;
     const template = (workoutBuilderTemplates[selectedCategory] ?? []).find(
@@ -2086,14 +2339,29 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       return next;
     });
 
+    applyExerciseOrderFromEntries(template.entries);
+
     setEntries((current) => {
       const byExercise = new Map(current.map((entry) => [entry.exercise, entry]));
       for (const entry of template.entries) {
         byExercise.set(entry.exercise, entry);
       }
-      return Array.from(byExercise.values());
+      // Emit in template order so the workout list matches the routine.
+      const ordered = template.entries.map(
+        (entry) => byExercise.get(entry.exercise) ?? entry,
+      );
+      const rest = Array.from(byExercise.values()).filter(
+        (entry) => !templateSet.has(entry.exercise),
+      );
+      return [...ordered, ...rest];
     });
     setExerciseCustomSeconds(template.exerciseCustomSeconds ?? {});
+    if (template.intervals) {
+      // Tabata and generic HIT share a category but need different timing.
+      setHitWorkSeconds(template.intervals.workSeconds);
+      setHitRestSeconds(template.intervals.restSeconds);
+      setHitTargetRounds(template.intervals.rounds);
+    }
     if (selectedCategory === "Bodybuilding") {
       setBodybuildingFlowActive(false);
       setBodybuildingFocusExercise(null);
@@ -2102,6 +2370,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       setHitCurrentRound(1);
     }
     setSelectedWorkoutBuilderName(template.name);
+    markTemplateUsed(selectedCategory, template.name);
     rememberQuickLoad("builder", template.name);
     setStatusText(`Workout-Builder "${template.name}" geladen.`);
     setErrorText("");
@@ -2307,30 +2576,13 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       return;
     }
 
-    // Sweep every app-owned key so new features are covered automatically
-    // instead of silently dropping out of the backup.
-    const records: Record<string, string> = {};
-    for (const storageKey of Object.keys(localStorage)) {
-      if (!storageKey.startsWith("momentum-")) {
-        continue;
-      }
-      const value = localStorage.getItem(storageKey);
-      if (value !== null) {
-        records[storageKey] = value;
-      }
-    }
-
-    const bundle = {
-      version: 2,
-      exportedAt: new Date().toISOString(),
-      selectedDate,
-      selectedCategory,
-      records,
-    };
-
+    const bundle = buildBackupBundle();
     const fileName = `momentum-backup-${getTodayDateKey()}.json`;
     const json = JSON.stringify(bundle, null, 2);
-    const count = Object.keys(records).length;
+    const count =
+      bundle.data.days.length +
+      bundle.data.bodyWeight.length +
+      Object.keys(bundle.data.documents).length;
 
     // On iOS the share sheet allows saving straight into Files / iCloud Drive,
     // which is far more useful than a download that lands in Downloads.
@@ -2341,28 +2593,42 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       typeof navigator.canShare === "function" &&
       navigator.canShare(shareData);
 
+    const downloadFallback = () => {
+      const blob = new Blob([json], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = fileName;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      markExported();
+      setHistoryInfo(readLocalHistory());
+      setStatusText(`Backup exportiert (${count} Einträge).`);
+      setErrorText("");
+    };
+
     if (canShareFile) {
       void navigator
         .share(shareData)
         .then(() => {
+          markExported();
+          setHistoryInfo(readLocalHistory());
           setStatusText(`Backup geteilt (${count} Einträge).`);
           setErrorText("");
         })
-        .catch(() => {
-          // User dismissed the sheet - not an error worth reporting.
+        .catch((error: unknown) => {
+          // AbortError means the user closed the sheet on purpose - stay quiet
+          // and do NOT claim the data was saved. Anything else is a real
+          // failure, so fall back to a download rather than silently no-op.
+          const aborted = error instanceof DOMException && error.name === "AbortError";
+          if (!aborted) {
+            downloadFallback();
+          }
         });
       return;
     }
 
-    const blob = new Blob([json], { type: "application/json;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = fileName;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    setStatusText(`Backup exportiert (${count} Einträge).`);
-    setErrorText("");
+    downloadFallback();
   };
 
   const triggerOfflineImport = () => {
@@ -2377,61 +2643,20 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
 
     try {
       const text = await file.text();
-      const parsed = JSON.parse(text) as {
-        version?: number;
-        selectedDate?: string;
-        selectedCategory?: string;
-        // v2 format: complete localStorage snapshot.
-        records?: Record<string, string>;
-        // v1 format kept for older backups.
-        liteRecords?: Record<string, string>;
-        hitWorkoutSets?: HitWorkoutSet[];
-        workoutBuilderTemplates?: Record<string, WorkoutBuilderTemplate[]>;
-        routineComposerByCategory?: Record<string, string[]>;
-        lastQuickLoadByCategory?: Record<string, LastQuickLoad>;
-        profile?: UserProfile;
-      };
+      // Merge: an older backup must never delete newer local sessions.
+      const summary = restoreBackupBundle(JSON.parse(text), "merge");
+      const touched = summary.daysAdded + summary.daysUpdated + summary.documentsMerged;
 
-      let restored = 0;
-
-      if (parsed.records) {
-        for (const [storageKey, value] of Object.entries(parsed.records)) {
-          if (storageKey.startsWith("momentum-")) {
-            localStorage.setItem(storageKey, value);
-            restored += 1;
-          }
-        }
-      } else {
-        // Legacy bundle: map the individually exported sections back.
-        for (const [storageKey, value] of Object.entries(parsed.liteRecords ?? {})) {
-          localStorage.setItem(storageKey, value);
-          restored += 1;
-        }
-        const legacy: Array<[string, unknown]> = [
-          [hitWorkoutSetsStorageKey, parsed.hitWorkoutSets],
-          [workoutBuilderTemplatesStorageKey, parsed.workoutBuilderTemplates],
-          [routineComposerStorageKey, parsed.routineComposerByCategory],
-          [lastQuickLoadStorageKey, parsed.lastQuickLoadByCategory],
-          [profileStorageKey, parsed.profile],
-        ];
-        for (const [storageKey, value] of legacy) {
-          if (value !== undefined) {
-            localStorage.setItem(storageKey, JSON.stringify(value));
-            restored += 1;
-          }
-        }
-      }
-
-      if (restored === 0) {
+      if (touched === 0 && summary.daysKept === 0) {
         setErrorText("Die Datei enthält keine Momentum-Daten.");
         return;
       }
 
-      setStatusText(`${restored} Einträge wiederhergestellt - App wird neu geladen ...`);
+      setStatusText(formatRestoreSummary(summary));
       setErrorText("");
       // A reload is the safest way to re-hydrate every piece of state from the
       // restored storage without stale values lingering in memory.
-      window.setTimeout(() => window.location.reload(), 600);
+      window.setTimeout(() => window.location.reload(), 1200);
     } catch (error) {
       setErrorText(`Import fehlgeschlagen: ${String(error)}`);
     } finally {
@@ -2447,39 +2672,25 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
         (e) => !(e.dateKey === entry.dateKey && e.category === entry.category),
       );
       const next = [...filtered, entry];
+      // Skip the write when nothing actually changed, so the debounced autosave
+      // cannot loop through the archive state update.
+      const previous = existing.find(
+        (e) => e.dateKey === entry.dateKey && e.category === entry.category,
+      );
+      if (previous && previous.text === entry.text && previous.mood === entry.mood) {
+        return;
+      }
       localStorage.setItem(journalArchiveStorageKey, JSON.stringify(next));
+      touchRevision(journalArchiveStorageKey);
       setJournalArchive(next);
     } catch {
       // ignore
     }
   };
 
-  const saveLite = () => {
-    if (activeExerciseTimer) {
-      pauseExerciseTimer(activeExerciseTimer.exercise);
-    }
-
-    const key = localStorageKey(selectedDate, selectedCategory);
-    const payload: LiteDayPayload = {
-      entries: visibleEntries,
-      reflection,
-      overallSeconds: overallLiveSeconds,
-    };
-    localStorage.setItem(key, JSON.stringify(payload));
-    setOverallBaseSeconds(overallLiveSeconds);
-    setOverallStartedAtMs(null);
-    setStatusText("Offline-Lite gespeichert.");
-    setErrorText("");
-
-    if (reflection.text.trim()) {
-      appendJournalArchive({
-        dateKey: selectedDate,
-        category: selectedCategory,
-        mood: reflection.flowScore ? `Score ${reflection.flowScore}` : "Score -",
-        text: reflection.text.trim(),
-      });
-    }
-  };
+  // Kept in a ref so the autosave effect does not need it as a dependency.
+  const appendJournalArchiveRef = useRef(appendJournalArchive);
+  appendJournalArchiveRef.current = appendJournalArchive;
 
   useEffect(() => {
     if (!phaseEndsAtMs) {
@@ -2604,6 +2815,10 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
         (entry) => entry.exercise !== currentWorkoutExercise && !entry.completed,
       )?.exercise ?? null
     : null;
+  /** What still needs filling before "Done & Next" will accept this exercise. */
+  const stickyBlocker = isBodybuilding
+    ? describeBodybuildingBlocker(currentWorkoutEntry ?? undefined)
+    : null;
 
   useEffect(() => {
     const templates = workoutBuilderTemplates[selectedCategory] ?? [];
@@ -2617,11 +2832,19 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       setSelectedWorkoutBuilderName(lastBuilder);
       return;
     }
-    setSelectedWorkoutBuilderName((current) =>
-      current && templates.some((template) => template.name === current)
-        ? current
-        : templates[templates.length - 1]?.name ?? "",
-    );
+    setSelectedWorkoutBuilderName((current) => {
+      if (current && templates.some((template) => template.name === current)) {
+        return current;
+      }
+      // Fall back to the most recently loaded routine rather than list order.
+      const used = templates.filter((template) => template.lastUsedAt);
+      if (used.length > 0) {
+        return used.reduce((best, item) =>
+          (item.lastUsedAt ?? "") > (best.lastUsedAt ?? "") ? item : best,
+        ).name;
+      }
+      return templates[templates.length - 1]?.name ?? "";
+    });
   }, [categoryLastQuickLoad, selectedCategory, workoutBuilderTemplates]);
 
   useEffect(() => {
@@ -2764,15 +2987,26 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
 
   /** Current measured value for a goal, per archetype. */
   const resolveGoalCurrentValue = (goal: Goal): number => {
+    // A goal scoped to a category must only count that category's sessions,
+    // otherwise "10 days morning routine" ticks up from a leg day.
+    const scopedDoneDays =
+      goal.category && goal.category !== allCategoriesOption
+        ? overviewStats.doneDaysByCategory.get(goal.category) ?? new Set<string>()
+        : new Set(overviewStats.doneDayKeys);
+
     switch (goal.type) {
       case "strength": {
         const record = overviewStats.personalRecords.get(goal.subject);
         return record?.estimatedOneRepMax ?? 0;
       }
       case "consistency":
-        return computeStreakWithGrace(new Set(overviewStats.doneDayKeys), getTodayDateKey()).streak;
-      case "frequency":
+        return computeStreakWithGrace(scopedDoneDays, getTodayDateKey()).streak;
+      case "frequency": {
+        if (goal.category && goal.category !== allCategoriesOption) {
+          return getLastNDays(7).filter((key) => scopedDoneDays.has(key)).length;
+        }
         return overviewStats.weekComparison.sessionsThisWeek;
+      }
       case "volume":
         return overviewStats.volumeTrend.reduce((sum, item) => sum + item.value, 0);
       case "bodyweight": {
@@ -2805,6 +3039,47 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
 
   const primaryGoal = goalCards.find((item) => !item.progress.reached) ?? goalCards[0] ?? null;
 
+  /** Most recently loaded routine of the active category, for the hint line. */
+  const lastUsedTemplateLabel = useMemo(() => {
+    const used = (workoutBuilderTemplates[selectedCategory] ?? []).filter(
+      (template) => template.lastUsedAt,
+    );
+    if (used.length === 0) {
+      return null;
+    }
+    const newest = used.reduce((best, item) =>
+      (item.lastUsedAt ?? "") > (best.lastUsedAt ?? "") ? item : best,
+    );
+    return `${newest.name} (${formatLastUsed(newest.lastUsedAt!)})`;
+  }, [selectedCategory, workoutBuilderTemplates]);
+
+  /**
+   * Nudge to export once unsaved history has built up. Without this the local
+   * copy is the only copy, and clearing site data would leave a permanent gap.
+   */
+  const exportReminder = useMemo(() => {
+    if (!historyInfo || historyInfo.loggedDays === 0) {
+      return null;
+    }
+    if (!historyInfo.lastExportAt) {
+      return `${historyInfo.loggedDays} Trainingstage sind noch nirgends gesichert. Jetzt exportieren, damit nichts verloren geht.`;
+    }
+    if (historyInfo.daysSinceExport >= 3) {
+      return `${historyInfo.daysSinceExport} neue Tage seit dem letzten Backup (${formatLastUsed(
+        historyInfo.lastExportAt,
+      )}). Kurz exportieren?`;
+    }
+    return null;
+  }, [historyInfo]);
+
+  const overlayGuide = useMemo(() => {    const exercise = phaseExercise;
+    if (!exercise) {
+      return null;
+    }
+    const guide = getExerciseGuide(exercise);
+    return guide ? { exercise, guide } : null;
+  }, [phaseExercise]);
+
   const submitGoal = () => {
     const meta = getGoalTypeMeta(goalDraft.type);
     const targetValue = Number.parseFloat(goalDraft.targetValue);
@@ -2835,6 +3110,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       createdAt: getTodayDateKey(),
       startValue: 0,
       planWhen: goalDraft.planWhen.trim() || undefined,
+      category: goalDraft.category,
       manualEntries: meta.automatic ? undefined : [],
     };
     // Anchor progress on today's measurement so the bar shows real movement.
@@ -2849,6 +3125,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       targetReps: "",
       targetDate: "",
       planWhen: "",
+      category: allCategoriesOption,
     });
     setStatusText("Ziel angelegt.");
     setErrorText("");
@@ -2953,6 +3230,65 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
 
   return (
     <section className="flex flex-1 flex-col gap-4 bg-[radial-gradient(circle_at_top,_rgba(45,212,191,0.14),transparent_44%)] pb-32 sm:pb-28">
+      {/* Kept at the root so the startup prompt can open it regardless of tab. */}
+      <input
+        ref={offlineImportRef}
+        type="file"
+        accept="application/json,text/json,.json"
+        onChange={(event) => {
+          void handleOfflineImport(event);
+        }}
+        className="hidden"
+      />
+
+      {showRestorePrompt ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-end justify-center bg-slate-950/70 p-4 sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="restore-prompt-title"
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl dark:bg-slate-900">
+            <h2
+              id="restore-prompt-title"
+              className="text-lg font-black text-slate-900 dark:text-slate-100"
+            >
+              Frühere Daten laden?
+            </h2>
+            <p className="mt-2 text-sm font-medium text-slate-700 dark:text-slate-300">
+              Auf diesem Gerät ist noch kein Training gespeichert. Lade dein
+              letztes Backup, um nahtlos weiterzumachen.
+            </p>
+            <p className="mt-2 text-xs font-medium text-slate-600 dark:text-slate-400">
+              Vorhandene Tage bleiben immer erhalten – beim Laden wird
+              zusammengeführt, nichts überschrieben.
+            </p>
+
+            <div className="mt-4 grid gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  triggerOfflineImport();
+                }}
+                className="min-h-12 w-full touch-manipulation rounded-xl bg-indigo-700 text-sm font-black text-white"
+              >
+                Backup-Datei laden
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  localStorage.setItem(restorePromptDismissedKey, "1");
+                  setShowRestorePrompt(false);
+                }}
+                className="min-h-12 w-full touch-manipulation rounded-xl border border-slate-300 text-sm font-semibold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+              >
+                Ohne alte Daten starten
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {hiddenLiteHero ? (
         <div className="overflow-hidden rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 via-orange-50 to-yellow-50 shadow-sm">
           <div className="relative h-64 w-full bg-rose-100 sm:h-72">
@@ -3276,7 +3612,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                   Zielwert ({getGoalTypeMeta(goalDraft.type).unit})
                   <input
                     type="number"
-                    step="0.5"
+                    step={getGoalTypeMeta(goalDraft.type).unit === "kg" ? "1" : "0.5"}
                     value={goalDraft.targetValue}
                     onChange={(event) =>
                       setGoalDraft((current) => ({ ...current, targetValue: event.target.value }))
@@ -3306,6 +3642,25 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                     className="min-h-11 rounded-md border border-slate-300 px-2 text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
                   />
                 </label>
+                {goalDraft.type === "consistency" || goalDraft.type === "frequency" ? (
+                  <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
+                    Gilt für
+                    <select
+                      value={goalDraft.category}
+                      onChange={(event) =>
+                        setGoalDraft((current) => ({ ...current, category: event.target.value }))
+                      }
+                      className="min-h-11 rounded-md border border-slate-300 px-2 text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                    >
+                      <option value={allCategoriesOption}>{allCategoriesOption}</option>
+                      {categories.map((category) => (
+                        <option key={`goal-cat-${category.name}`} value={category.name}>
+                          {category.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
               </div>
 
               <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
@@ -3933,6 +4288,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                 {(workoutBuilderTemplates[selectedCategory] ?? []).map((template) => (
                   <option key={`${template.category}-${template.name}`} value={template.name}>
                     {template.name}
+                    {template.lastUsedAt ? ` · zuletzt ${formatLastUsed(template.lastUsedAt)}` : ""}
                   </option>
                 ))}
               </select>
@@ -3944,6 +4300,11 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                 Laden
               </button>
             </div>
+            {lastUsedTemplateLabel ? (
+              <p className="mt-2 text-[11px] font-medium text-slate-600 dark:text-slate-300">
+                Zuletzt verwendet: {lastUsedTemplateLabel}
+              </p>
+            ) : null}
           </div>
         ) : null}
         {pageViewTab === "builder" ? (
@@ -4279,6 +4640,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                               type="number"
                               min={0}
                               value={entry.reps}
+                              placeholder={entry.targetReps ? `Ziel ${entry.targetReps}` : "Reps"}
                               onChange={(event) =>
                                 handleEntryChange(entry.exercise, { reps: event.target.value })
                               }
@@ -4292,7 +4654,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                             <input
                               type="number"
                               min={0}
-                              step="0.5"
+                              step="1"
                               value={entry.weightKg}
                               onChange={(event) =>
                                 handleEntryChange(entry.exercise, { weightKg: event.target.value })
@@ -4531,6 +4893,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                                 type="number"
                                 min={0}
                                 value={entry.reps}
+                                placeholder={entry.targetReps ? `Ziel ${entry.targetReps}` : "Reps"}
                                 onChange={(event) =>
                                   handleEntryChange(entry.exercise, { reps: event.target.value })
                                 }
@@ -4542,7 +4905,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                               <input
                                 type="number"
                                 min={0}
-                                step="0.5"
+                                step="1"
                                 value={entry.weightKg}
                                 onChange={(event) =>
                                   handleEntryChange(entry.exercise, { weightKg: event.target.value })
@@ -4614,13 +4977,19 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                                           event.target.value,
                                         )
                                       }
-                                      placeholder={ghost ? `${ghost.reps} Reps` : "Reps"}
+                                      placeholder={
+                                        ghost
+                                          ? `${ghost.reps} Reps`
+                                          : entry.targetReps
+                                            ? `Ziel ${entry.targetReps}`
+                                            : "Reps"
+                                      }
                                       className="min-h-11 rounded-md border border-slate-400 px-2 py-1 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
                                     />
                                     <input
                                       type="number"
                                       min={0}
-                                      step="0.5"
+                                      step="1"
                                       value={setLog.weightKg}
                                       onChange={(event) =>
                                         updateSetLogValue(
@@ -4840,6 +5209,21 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                 />
                 🔊 Signale
               </label>
+              <button
+                type="button"
+                onClick={async () => {
+                  const unlocked = await unlockAudio();
+                  if (!unlocked) {
+                    setStatusText("Ton blockiert. Bitte Seite antippen und erneut testen.");
+                    return;
+                  }
+                  playWorkStart(intervalSettings.profile);
+                  setStatusText("Testton gespielt. Falls stumm: Lautstärke am Gerät prüfen.");
+                }}
+                className="touch-manipulation rounded-md border border-cyan-500 px-2.5 py-1.5 text-xs font-semibold text-cyan-900 dark:border-cyan-700 dark:text-cyan-200"
+              >
+                Ton testen
+              </button>
               {isIntervalCategory ? (
                 <label className="flex items-center gap-1.5 text-xs font-semibold text-cyan-900 dark:text-cyan-200">
                   Vorlauf
@@ -4915,11 +5299,9 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
           </div>
           {isIntervalCategory ? (
             <p className="mt-2 text-[11px] font-medium text-cyan-800 dark:text-cyan-300">
-              {isTabata
-                ? `Tabata: 20s Belastung / 10s Pause · ${tabataRounds} Runden`
-                : isHitWorkout
-                  ? `HIT: ${hitWorkSeconds}s Belastung / ${hitRestSeconds}s Pause · ${hitTargetRounds} Runden`
-                  : "Signale: sanfter Gong bei jedem Übungswechsel."}
+              {isHitWorkout
+                ? `HIT: ${hitWorkSeconds}s Belastung / ${hitRestSeconds}s Pause · ${hitTargetRounds} Runden`
+                : "Signale: sanfter Gong bei jedem Übungswechsel."}
             </p>
           ) : null}
         </div>
@@ -4946,21 +5328,6 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                 />
                 Halbzeit-Signal
               </label>
-              {isTabata ? (
-                <label className="flex items-center gap-1.5 text-xs font-medium text-emerald-900 dark:text-emerald-200">
-                  Runden
-                  <input
-                    type="number"
-                    min={1}
-                    max={20}
-                    value={tabataRounds}
-                    onChange={(event) =>
-                      setTabataRounds(Math.max(1, Number.parseInt(event.target.value || "1", 10)))
-                    }
-                    className="w-16 rounded-md border border-emerald-300 bg-white px-2 py-1 text-slate-900 dark:border-emerald-800 dark:bg-slate-950 dark:text-slate-100"
-                  />
-                </label>
-              ) : null}
             </div>
 
             <div className="mt-3 grid gap-1.5">
@@ -5134,38 +5501,41 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
 
 
 
-        <div className="mt-4 flex flex-wrap gap-2.5">
+        <div className="mt-4 flex flex-wrap items-center gap-2.5">
           <button
             type="button"
-            onClick={saveLite}
+            onClick={exportOfflineData}
             className="touch-manipulation rounded-lg bg-indigo-700 px-4 py-2.5 text-sm font-semibold text-white"
           >
-            Offline speichern
+            Datei exportieren
           </button>
           <button
             type="button"
             onClick={triggerOfflineImport}
             className="touch-manipulation rounded-lg border border-indigo-600 px-4 py-2.5 text-sm font-semibold text-indigo-800 dark:text-indigo-300"
           >
-            Offline laden
+            Datei laden
           </button>
-          <button
-            type="button"
-            onClick={exportOfflineData}
-            className="touch-manipulation rounded-lg border border-slate-400 px-4 py-2.5 text-sm font-semibold text-slate-700 dark:text-slate-200 dark:border-slate-600"
-          >
-            Datei exportieren
-          </button>
-          <input
-            ref={offlineImportRef}
-            type="file"
-            accept="application/json,text/json,.json"
-            onChange={(event) => {
-              void handleOfflineImport(event);
-            }}
-            className="hidden"
-          />
+          <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
+            Änderungen werden automatisch gespeichert.
+          </span>
         </div>
+
+        {exportReminder ? (
+          <p className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+            {exportReminder}
+          </p>
+        ) : historyInfo && historyInfo.loggedDays > 0 ? (
+          <p className="mt-2 text-xs font-medium text-slate-600 dark:text-slate-300">
+            Historie: {historyInfo.loggedDays} Trainingstage
+            {historyInfo.firstDay && historyInfo.lastDay
+              ? ` · ${historyInfo.firstDay} bis ${historyInfo.lastDay}`
+              : ""}
+            {historyInfo.lastExportAt
+              ? ` · zuletzt gesichert ${formatLastUsed(historyInfo.lastExportAt)}`
+              : ""}
+          </p>
+        ) : null}
         </>
         ) : null}
 
@@ -5199,20 +5569,18 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
               HIT benötigt pro Übung Reps &gt; 0 vor Done & Next.
             </p>
           ) : null}
-          <div className="mt-2 grid grid-cols-2 gap-2.5">
+          {isBodybuilding && stickyBlocker ? (
+            <p className="mt-2 rounded-md bg-amber-100 px-2 py-1.5 text-[11px] font-bold text-amber-900 dark:bg-amber-950/60 dark:text-amber-200">
+              {stickyBlocker}
+            </p>
+          ) : null}
+          <div className="mt-2">
             <button
               type="button"
               onClick={runStickyDoneNext}
-              className="touch-manipulation min-h-11 rounded-lg bg-emerald-600 px-3 py-2.5 text-sm font-bold text-white"
+              className="touch-manipulation min-h-11 w-full rounded-lg bg-emerald-600 px-3 py-2.5 text-sm font-bold text-white"
             >
-              ✓ Done & Next
-            </button>
-            <button
-              type="button"
-              onClick={saveLite}
-              className="touch-manipulation min-h-11 rounded-lg border border-indigo-500 px-3 py-2.5 text-xs font-semibold text-indigo-800 dark:text-indigo-300"
-            >
-              Offline Save
+              ✓ Done &amp; Next
             </button>
           </div>
         </div>
@@ -5233,14 +5601,24 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                 ? ` · Runde ${phaseRound} / ${intervalSettings.totalRounds}`
                 : ""}
             </span>
-            <button
-              type="button"
-              onClick={() => setShowFocusOverlay(false)}
-              className="min-h-11 min-w-11 rounded-full bg-black/25 px-4 text-sm font-bold text-white"
-              aria-label="Vollbild verlassen"
-            >
-              ✕
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowExerciseGuide((current) => !current)}
+                aria-pressed={showExerciseGuide}
+                className="min-h-11 rounded-full bg-black/25 px-3 text-xs font-bold text-white"
+              >
+                {showExerciseGuide ? "Anleitung aus" : "Anleitung"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowFocusOverlay(false)}
+                className="min-h-11 min-w-11 rounded-full bg-black/25 px-4 text-sm font-bold text-white"
+                aria-label="Vollbild verlassen"
+              >
+                ✕
+              </button>
+            </div>
           </div>
 
           <div className="flex flex-1 flex-col items-center justify-center px-5 text-center">
@@ -5287,6 +5665,43 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
               <p className="mt-6 rounded-full bg-black/25 px-4 py-2 text-sm font-semibold text-white">
                 Next: {phaseUpcomingExercise}
               </p>
+            ) : null}
+
+            {/* Movement guide for whatever is on deck: during a rest phase the
+                upcoming exercise is the useful one to prepare for. */}
+            {overlayGuide && showExerciseGuide ? (
+              <div className="mt-5 w-full max-w-md rounded-2xl bg-black/25 p-3 text-left">
+                <div className="flex items-start gap-3">
+                  {overlayGuide.guide.motion ? (
+                    <div className="h-20 w-20 shrink-0 text-white/90">
+                      <ExerciseAnimation motion={overlayGuide.guide.motion} />
+                    </div>
+                  ) : null}
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-white/70">
+                      {overlayGuide.exercise}
+                    </p>
+                    <p className="mt-0.5 text-xs font-medium text-white/85">
+                      {overlayGuide.guide.setup}
+                    </p>
+                    <ul className="mt-1.5 space-y-0.5">
+                      {overlayGuide.guide.cues.slice(0, 3).map((cue) => (
+                        <li
+                          key={`overlay-cue-${cue}`}
+                          className="text-xs font-semibold text-white before:mr-1.5 before:content-['·']"
+                        >
+                          {cue}
+                        </li>
+                      ))}
+                    </ul>
+                    {overlayGuide.guide.focus ? (
+                      <p className="mt-1.5 text-[11px] font-medium italic text-white/70">
+                        {overlayGuide.guide.focus}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
             ) : null}
 
             {intervalPhase === "complete" ? (

@@ -1,16 +1,23 @@
 # Momentum Journal (Offline PWA)
 
-Mobil-first Journal fuer Morgenroutine, Yoga, Tabata, HIT, Running/Cardio und
+Mobil-first Journal fuer Morgenroutine, Yoga, HIT (inkl. Tabata) und
 Bodybuilding. Die App laeuft **komplett offline** – kein Login, kein Server,
 keine Cloud. Alle Daten liegen im `localStorage` des Geraets.
 
 - Workout-Flow mit Timer, Audio-Signalen und Vollbild-Fokus
+- Bewegungs-Anleitung je Uebung: Form-Hinweise, bei der Morgenroutine
+  zusaetzlich eine animierte Strichfigur
 - Builder: Uebungen waehlen, Reihenfolge festlegen, Saetze und Satzart pflegen
-- 23 evidenzbasierte Preset-Routinen
+  (max. 3 Saetze als Standard, Gewicht in 1-kg-Schritten)
+- Morgenroutine mit Standard- und **Extended**-Variante (Extended ergaenzt die
+  taeglichen Gewohnheiten: Journal Check-in, Kaffee & Wasser, Tagesfokus)
+- Evidenzbasierte Preset-Routinen (Tabata bringt sein 20/10-Timing selbst mit)
 - Bodybuilding Satz-Logging (Reps + Gewicht pro Satz, DONE pro Satz)
 - Taeglicher Check-in (0-10 Smiley + Freitext)
 - Activity Tracker mit Zielen, PRs, Tonnage und Stimmungs-Trend
+- Ziele optional auf eine Kategorie begrenzt ("10 Tage Morgenroutine")
 - Eigene Uebungen hinzufuegen, ausblenden und verwalten
+- **Autosave**: Aenderungen werden automatisch gespeichert
 - Sicherung per JSON-Export/Import (auf iOS direkt in iCloud Drive)
 
 ## Lokaler Start
@@ -56,16 +63,86 @@ Danach laeuft die App als installierte PWA auch im Flugmodus.
 
 ## Daten sichern
 
-- **Datei exportieren** schreibt alle `momentum-*` Schluessel in eine
-  JSON-Datei. Auf iOS oeffnet sich das Teilen-Menue, sodass du direkt in
+Der aktuelle Tag wird **automatisch** gespeichert (Autosave), es gibt keinen
+Speichern-Knopf mehr. Fuer alles darueber hinaus:
+
+- **Datei exportieren** schreibt den kompletten Datenbestand in eine JSON-Datei.
+  Auf iOS oeffnet sich das Teilen-Menue, sodass du direkt in
   **Dateien → iCloud Drive** sichern kannst.
-- **Offline laden** liest eine solche Datei wieder ein und laedt die App neu.
+- **Datei laden** liest eine solche Datei wieder ein und laedt die App neu.
 
 Da alles lokal liegt, ist der Export die einzige Sicherung – vor dem Loeschen
 der Website-Daten oder einem Geraetewechsel unbedingt exportieren.
 
-## Optionales Hosting
+### Fortlaufende Historie
 
+Damit ueber Geraetewechsel und Neuinstallationen hinweg keine Tage fehlen:
+
+- **Startabfrage:** Ist auf einem Geraet noch kein Training gespeichert (frische
+  Installation, geleerter Safari-Speicher, neues Handy), fragt die App beim
+  Start, ob ein Backup geladen werden soll. Danach wird nicht mehr gefragt.
+- **Import fuehrt zusammen, statt zu ueberschreiben.** Tage werden per
+  `dateKey` + `category` vereinigt, Ziele per `id`, Routinen per Name. Ein
+  aelteres Backup kann neuere lokale Sessions also nicht loeschen.
+- **Konfliktregel:** Bei demselben Tag auf beiden Seiten gewinnt der Datensatz
+  mit mehr erledigten Uebungen; erst bei Gleichstand entscheidet `updatedAt`.
+  So wird ein geloggtes Training nie gegen einen leeren Tag getauscht.
+- **Export-Erinnerung:** Sammeln sich Trainingstage seit dem letzten Backup an,
+  weist die App darauf hin. Ansonsten zeigt sie den Umfang der Historie
+  (Anzahl Tage, Zeitraum, letzte Sicherung).
+
+### Backup-Format (cloud-faehig)
+
+Der Export ist bewusst *domaenenorientiert* statt ein roher `localStorage`-Dump,
+damit derselbe Payload spaeter als Wire-Format fuer einen Cloud-Account dienen
+kann (siehe [src/lib/backup.ts](./src/lib/backup.ts)):
+
+```jsonc
+{
+  "schemaVersion": 3,
+  "app": "momentum-journal",
+  "exportedAt": "2026-09-03T07:14:00.000Z",
+  "owner": { "userId": null, "deviceId": "device-ab12cd34" },
+  "data": {
+    "days":       [ { "dateKey": "...", "category": "...", "payload": {}, "updatedAt": "..." } ],
+    "bodyWeight": [ { "dateKey": "...", "value": "82.4",   "updatedAt": "..." } ],
+    "documents":  { "momentum-goals:v1": [], "momentum-profile:v1": {} }
+  }
+}
+```
+
+- jede Sammlung hat einen stabilen natuerlichen Schluessel (Tag: `dateKey` +
+  `category`, Ziel: `id`, Routine: `category` + `name`) → ein Server kann
+  *upserten* statt einen Blob zu ersetzen
+- jeder Datensatz traegt `updatedAt` → Grundlage fuer Konfliktaufloesung
+  (last-write-wins) bei spaeterer Synchronisierung
+- `owner.userId` ist reserviert, damit ein Export spaeter einem Konto
+  zugeordnet werden kann, ohne das Schema zu aendern
+- aeltere Backups (v1/v2) bleiben importierbar
+
+## Uebungs-Anleitungen
+
+Jede Uebung hat Setup- und Ausfuehrungs-Hinweise. Visuals gibt es bewusst nur
+dort, wo sie ehrlich funktionieren:
+
+- **Morgenroutine:** animierte Strichfiguren (siehe
+  [exercise-animation.tsx](./src/components/exercise-animation.tsx) und die
+  Keyframes in [globals.css](./src/app/globals.css)). Diese Bewegungen kommen in
+  keiner freien Mediendatenbank vor, und gerade hier hilft es, den *Uebergang*
+  zu sehen.
+- **Yoga:** keine Grafik. Es sind statische Haltungen, fuer die eine Animation
+  das falsche Mittel waere. Das einzige verifizierte CC0-Set (6 Openclipart-
+  Zeichnungen) enthaelt keine der hier verwendeten Posen.
+- **HIT:** keine Grafik. Es existiert keine frei lizenzierte Animation fuer
+  diese Bewegungen – Wikimedia Commons hat dafuer nicht einmal eine Kategorie,
+  und kommerzielle GIF-Bibliotheken sind proprietaer oder ohne belegbare
+  Herkunft.
+
+Zwei Morgenroutine-Uebungen (World's Best Stretch, Lunge Front Reach) haben
+ebenfalls keine Figur: ihre 3D-Rotation laesst sich als flache Strichfigur nicht
+verstaendlich darstellen. Lieber nichts als etwas Irrefuehrendes.
+
+## Optionales Hosting
 Die App ist ein reiner Client. Jedes statische Hosting genuegt.
 
 ### Vercel

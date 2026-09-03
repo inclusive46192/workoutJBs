@@ -8,16 +8,35 @@
  *   context is a lazy singleton that is unlocked once when a session starts.
  * - Cues are scheduled ahead on the audio thread clock instead of via
  *   setTimeout, so React re-renders cannot delay them.
+ * - THE SILENT SWITCH: WebKit derives the iOS AVAudioSession category from what
+ *   the page plays. A page whose only source is an AudioContext gets the
+ *   "Ambient" category, which Apple documents as silenced by the Ring/Silent
+ *   switch -- so a pure Web Audio timer is inaudible on iPhone by design.
+ *   Two things lift us into "Playback", which ignores the switch:
+ *     1. navigator.audioSession.type = "playback"  (Safari 16.4+)
+ *     2. a looping, silent <audio> element started from a user gesture
+ *   We do both, because (2) also covers older iOS.
  */
 
 export type SignalProfile = "intense" | "calm";
 
 type ScheduledNode = { stop: (when?: number) => void };
 
+type AudioSessionCapableNavigator = Navigator & {
+  audioSession?: { type: string };
+};
+
 let audioContext: AudioContext | null = null;
-let keepAliveNode: OscillatorNode | null = null;
+let sessionAnchor: HTMLAudioElement | null = null;
 let scheduledNodes: ScheduledNode[] = [];
 let signalsEnabled = true;
+
+/**
+ * 0.05s of MP3 silence. Content silence is fine: WebKit only checks that the
+ * element has an audio track and is not muted when picking the category.
+ */
+const silentLoopDataUri =
+  "data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwP////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAASDs90hvAAAAAAAAAAAAAAAAAAAA//MUZAAAAAGkAAAAAAAAA0gAAAAATEFN//MUZAMAAAGkAAAAAAAAA0gAAAAARTMu//MUZAYAAAGkAAAAAAAAA0gAAAAAOTku//MUZAkAAAGkAAAAAAAAA0gAAAAANVVV";
 
 function resolveAudioContext(): AudioContext | null {
   if (typeof window === "undefined") {
@@ -37,21 +56,71 @@ function resolveAudioContext(): AudioContext | null {
 }
 
 /**
- * Near-silent oscillator that keeps the audio session from being suspended
- * while a workout is running.
+ * Requests the "playback" audio session so cues survive the Ring/Silent switch.
+ * Returns false when the API is missing (iOS < 16.4) so the caller can fall
+ * back to the silent-loop anchor.
  */
-function startKeepAlive(context: AudioContext) {
-  if (keepAliveNode) {
+function requestPlaybackSession(): boolean {
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+  const nav = navigator as AudioSessionCapableNavigator;
+  if (!nav.audioSession) {
+    return false;
+  }
+  try {
+    nav.audioSession.type = "playback";
+    return nav.audioSession.type === "playback";
+  } catch {
+    return false;
+  }
+}
+
+/** Must be started from a user gesture. Keeps the session in "Playback". */
+function startSessionAnchor() {
+  if (typeof document === "undefined") {
     return;
   }
-  const oscillator = context.createOscillator();
-  const gain = context.createGain();
-  oscillator.frequency.value = 30;
-  gain.gain.value = 0.0001;
-  oscillator.connect(gain);
-  gain.connect(context.destination);
-  oscillator.start();
-  keepAliveNode = oscillator;
+  if (!sessionAnchor) {
+    const element = document.createElement("audio");
+    element.setAttribute("x-webkit-airplay", "deny");
+    element.loop = true;
+    element.preload = "auto";
+    element.src = silentLoopDataUri;
+    element.load();
+    sessionAnchor = element;
+  }
+  if (sessionAnchor.paused) {
+    void sessionAnchor.play().catch(() => {
+      /* gesture requirement not met; cues may stay silent */
+    });
+  }
+}
+
+/**
+ * Releases the audio session so the user's music can resume and the iOS
+ * lock-screen transport controls disappear.
+ */
+export function releaseAudioSession() {
+  if (sessionAnchor) {
+    sessionAnchor.pause();
+    // Detach the source so iOS drops the Now Playing widget. Removing the
+    // attribute (rather than pointing it at about:blank) avoids a bogus
+    // ERR_UNKNOWN_URL_SCHEME fetch in the console.
+    sessionAnchor.removeAttribute("src");
+    sessionAnchor.load();
+    sessionAnchor = null;
+  }
+  if (typeof navigator !== "undefined") {
+    const nav = navigator as AudioSessionCapableNavigator;
+    if (nav.audioSession) {
+      try {
+        nav.audioSession.type = "auto";
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 }
 
 export function setSignalsEnabled(enabled: boolean) {
@@ -66,6 +135,32 @@ export function areSignalsEnabled() {
 }
 
 /**
+ * True unless the context is unusable. WebKit has a non-standard "interrupted"
+ * state (after a call, Siri, or a route change) that is NOT "suspended", so a
+ * suspended-only check would silently skip the resume and stay mute.
+ */
+function needsResume(context: AudioContext): boolean {
+  return context.state !== "running" && context.state !== "closed";
+}
+
+/**
+ * Cheap guard used by every cue. If the context was interrupted (call, Siri,
+ * route change) it kicks off a resume so the *next* cue lands, instead of the
+ * session going permanently mute.
+ */
+function ensureRunning(context: AudioContext): boolean {
+  if (context.state === "running") {
+    return true;
+  }
+  if (context.state !== "closed") {
+    void context.resume().catch(() => {
+      /* needs a fresh user gesture */
+    });
+  }
+  return false;
+}
+
+/**
  * Must be called from inside a click/touchend handler before any cue can play.
  */
 export async function unlockAudio(): Promise<boolean> {
@@ -73,14 +168,18 @@ export async function unlockAudio(): Promise<boolean> {
   if (!context) {
     return false;
   }
-  if (context.state === "suspended") {
+  // Set the category before the first cue is scheduled: the change round-trips
+  // through AVAudioSession and is not applied instantaneously.
+  if (!requestPlaybackSession()) {
+    startSessionAnchor();
+  }
+  if (needsResume(context)) {
     try {
       await context.resume();
     } catch {
       return false;
     }
   }
-  startKeepAlive(context);
   return context.state === "running";
 }
 
@@ -122,7 +221,7 @@ function scheduleTone(
  */
 export function playHapticClick() {
   const context = resolveAudioContext();
-  if (!context || !signalsEnabled || context.state !== "running") {
+  if (!context || !signalsEnabled || !ensureRunning(context)) {
     return;
   }
   const frameCount = Math.max(1, Math.floor(context.sampleRate * 0.003));
@@ -143,7 +242,7 @@ export function playHapticClick() {
 
 export function playWorkStart(profile: SignalProfile = "intense") {
   const context = resolveAudioContext();
-  if (!context || !signalsEnabled || context.state !== "running") {
+  if (!context || !signalsEnabled || !ensureRunning(context)) {
     return;
   }
   playHapticClick();
@@ -158,7 +257,7 @@ export function playWorkStart(profile: SignalProfile = "intense") {
 
 export function playRestStart(profile: SignalProfile = "intense") {
   const context = resolveAudioContext();
-  if (!context || !signalsEnabled || context.state !== "running") {
+  if (!context || !signalsEnabled || !ensureRunning(context)) {
     return;
   }
   playHapticClick();
@@ -173,7 +272,7 @@ export function playRestStart(profile: SignalProfile = "intense") {
 
 export function playSessionComplete(profile: SignalProfile = "intense") {
   const context = resolveAudioContext();
-  if (!context || !signalsEnabled || context.state !== "running") {
+  if (!context || !signalsEnabled || !ensureRunning(context)) {
     return;
   }
   const now = context.currentTime;
@@ -187,7 +286,7 @@ export function playSessionComplete(profile: SignalProfile = "intense") {
 
 export function playHalfway(profile: SignalProfile = "intense") {
   const context = resolveAudioContext();
-  if (!context || !signalsEnabled || context.state !== "running") {
+  if (!context || !signalsEnabled || !ensureRunning(context)) {
     return;
   }
   playHapticClick();
@@ -205,7 +304,7 @@ export function schedulePhaseCues(options: {
   startOffsetSeconds?: number;
 }): () => void {
   const context = resolveAudioContext();
-  if (!context || !signalsEnabled || context.state !== "running") {
+  if (!context || !signalsEnabled || !ensureRunning(context)) {
     return () => {};
   }
 
@@ -295,12 +394,5 @@ export function cancelScheduledCues() {
 
 export function releaseAudio() {
   cancelScheduledCues();
-  if (keepAliveNode) {
-    try {
-      keepAliveNode.stop();
-    } catch {
-      // already stopped
-    }
-    keepAliveNode = null;
-  }
+  releaseAudioSession();
 }

@@ -30,6 +30,12 @@ export type PresetRoutine = {
   category: string;
   /** One-line rationale shown in the builder. */
   note: string;
+  /**
+   * Interval timing this routine is designed for. Tabata needs 20s/10s x8
+   * while a generic HIT circuit runs 40s/20s, and both now live in the same
+   * category, so the timing travels with the routine instead of the category.
+   */
+  intervals?: { workSeconds: number; restSeconds: number; rounds: number };
   exercises: PresetExercise[];
 };
 
@@ -119,7 +125,7 @@ export const presetRoutines: PresetRoutine[] = [
       hypertrophy("Lat Pulldown", 3, "10-15", 90),
       { exercise: "Lateral Raise", sets: 3, reps: "15-20", kind: "superset", restSeconds: 60 },
       { exercise: "Face Pull", sets: 3, reps: "15-20", kind: "superset", restSeconds: 60 },
-      { exercise: "Dumbbell Curl", sets: 3, reps: "12-15", kind: "dropset", restSeconds: 90 },
+      { exercise: "Dumbbell Curl", sets: 3, reps: "12-15", kind: "failure", restSeconds: 90 },
     ],
   },
   {
@@ -142,8 +148,8 @@ export const presetRoutines: PresetRoutine[] = [
       hypertrophy("Leg Press", 4, "10-15", 120, 1),
       hypertrophy("Barbell Hip Thrust", 4, "10-15", 90),
       hypertrophy("Bulgarian Split Squat", 3, "10-15", 90),
-      { exercise: "Leg Extension", sets: 3, reps: "12-20", kind: "dropset", restSeconds: 60 },
-      { exercise: "Seated Leg Curl", sets: 3, reps: "12-20", kind: "dropset", restSeconds: 60 },
+      { exercise: "Leg Extension", sets: 3, reps: "12-20", kind: "failure", restSeconds: 60 },
+      { exercise: "Seated Leg Curl", sets: 3, reps: "12-20", kind: "failure", restSeconds: 60 },
       hypertrophy("Standing Calf Raise", 4, "12-20", 60),
     ],
   },
@@ -248,50 +254,29 @@ export const presetRoutines: PresetRoutine[] = [
     ],
   },
 
-  // --------------------------------------------------------------------- Tabata
+  // ------------------------------------ Tabata (runs inside the HIT category)
   {
     name: "Tabata Original (Ganzkörper)",
-    category: "Tabata",
+    category: "HIT Workouts",
     note: "Tabata 1996: 20s maximal / 10s Pause, 8 Runden – +28% anaerobe Kapazität.",
+    intervals: { workSeconds: 20, restSeconds: 10, rounds: 8 },
     exercises: [
-      timed("Burpee", 20, "max"),
-      timed("Mountain climber", 20, "max"),
-      timed("Jump squat", 20, "max"),
+      timed("Burpees", 20, "max"),
+      timed("Mountain climbers", 20, "max"),
+      timed("Jump squats", 20, "max"),
       timed("High knees", 20, "max"),
     ],
   },
   {
     name: "Tabata Unterkörper",
-    category: "Tabata",
-    note: "Beinfokus im Original-Timing.",
+    category: "HIT Workouts",
+    note: "Beinfokus im Original-Timing: 20s / 10s, 8 Runden.",
+    intervals: { workSeconds: 20, restSeconds: 10, rounds: 8 },
     exercises: [
-      timed("Jump squat", 20, "max"),
+      timed("Jump squats", 20, "max"),
       timed("Skater hop", 20, "max"),
       timed("High knees", 20, "max"),
-      timed("Mountain climber", 20, "max"),
-    ],
-  },
-
-  // ------------------------------------------------------------------- Cardio
-  {
-    name: "Norwegian 4x4",
-    category: "Running/Cardio",
-    note: "Helgerud 2007: 4x4 min bei 90-95% HFmax – stärkster VO2max-Effekt.",
-    exercises: [
-      { exercise: "Warm-up locker", sets: 1, reps: "10 min", kind: "warmup", restSeconds: 0, workSeconds: 600 },
-      { exercise: "Norwegian 4x4 interval", sets: 4, reps: "4 min @ 90-95%", kind: "working", restSeconds: 180, workSeconds: 240 },
-      { exercise: "Cool-down locker", sets: 1, reps: "5 min", kind: "working", restSeconds: 0, workSeconds: 300 },
-    ],
-  },
-  {
-    name: "30-20-10 Intervall",
-    category: "Running/Cardio",
-    note: "Gunnarsson/Bangsbo 2012: 5K-Zeit -48s in 7 Wochen bei 12 min Laufzeit.",
-    exercises: [
-      { exercise: "Warm-up locker", sets: 1, reps: "5 min", kind: "warmup", restSeconds: 0, workSeconds: 300 },
-      { exercise: "Zone 2 walk/jog 30 min", sets: 5, reps: "30s locker", kind: "working", restSeconds: 0, workSeconds: 30 },
-      { exercise: "Tempo run 15 min", sets: 5, reps: "20s zügig", kind: "working", restSeconds: 0, workSeconds: 20 },
-      { exercise: "Sprint 10s", sets: 5, reps: "10s Sprint", kind: "failure", restSeconds: 120, workSeconds: 10 },
+      timed("Mountain climbers", 20, "max"),
     ],
   },
 
@@ -333,10 +318,36 @@ export const presetRoutines: PresetRoutine[] = [
       timed("Cat-Cow", 40),
       timed("Arm swings", 30),
       timed("Leg Swing", 40),
+      timed("90/90 Hip Switch", 40),
       timed("World best stretch opener", 60),
       timed("Deep squat opener", 45),
+      timed("Knee over Toe", 40),
       timed("Body waves", 30),
       timed("Trunk twist", 30),
+    ],
+  },
+  {
+    name: "Morning Routine Extended",
+    category: "Morning Routine",
+    note: "Volle Mobility-Sequenz plus die täglichen Gewohnheiten zum Abhaken.",
+    exercises: [
+      timed("Lymphatic hops", 30),
+      timed("Cat-Cow", 40),
+      timed("Body waves", 30),
+      timed("Trunk twist", 30),
+      timed("Dead arms", 30),
+      timed("Golf swing", 30),
+      timed("Arm swings", 30),
+      timed("March slaps", 30),
+      timed("90/90 Hip Switch", 40),
+      timed("Knee over Toe", 40),
+      timed("Cossack squat", 45),
+      timed("Deep squat opener", 45),
+      timed("World best stretch opener", 60),
+      timed("Leg Swing", 40),
+      timed("Journal Check-in", 60),
+      timed("Kaffee & Wasser vorbereiten", 60),
+      timed("Tagesfokus setzen", 60),
     ],
   },
 ];

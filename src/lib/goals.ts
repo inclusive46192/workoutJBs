@@ -223,10 +223,17 @@ export function computeStreakWithGrace(
   let streak = 0;
   let graceUsed = 0;
 
+  // Local date arithmetic: toISOString() would shift the key by a day in any
+  // timezone east of UTC and silently under-report the streak.
+  const [year, month, day] = todayKey.split("-").map(Number);
+  const anchor = new Date(year, (month ?? 1) - 1, day ?? 1);
+
   for (let offset = 0; offset < 400; offset += 1) {
-    const date = new Date(`${todayKey}T00:00:00`);
+    const date = new Date(anchor);
     date.setDate(date.getDate() - offset);
-    const key = date.toISOString().slice(0, 10);
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
+      date.getDate(),
+    ).padStart(2, "0")}`;
 
     if (doneDays.has(key)) {
       streak += 1;
