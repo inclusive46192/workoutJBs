@@ -184,6 +184,8 @@ const signalPrefsStorageKey = "momentum-signals:prefs:v1";
 const lastSetValuesStorageKey = "momentum-sets:last-values:v1";
 const goalsStorageKey = "momentum-goals:v1";
 const restorePromptDismissedKey = "momentum-sync:restore-prompt-dismissed:v1";
+/** One-shot message that survives the reload after a restore. */
+const lastRestoreStorageKey = "momentum-sync:last-restore:v1";
 /** Upper bound for sets seeded from a preset or default. */
 const maxDefaultSets = 3;
 /** Sentinel for goals that are not scoped to a single category. */
@@ -322,7 +324,7 @@ function formatRestoreSummary(summary: RestoreSummary): string {
       ? ` · Historie ${summary.rangeStart} bis ${summary.rangeEnd}`
       : "";
   const detail = parts.length > 0 ? parts.join(", ") : "keine neuen Tage";
-  return `${detail}${range} - App wird neu geladen ...`;
+  return `Backup geladen: ${detail}${range}`;
 }
 
 function localStorageKey(dateKey: string, category: string): string {
@@ -596,6 +598,11 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   /** Snapshot of stored history, drives the startup prompt and export nudge. */
   const [historyInfo, setHistoryInfo] = useState<LocalHistory | null>(null);
   const [showRestorePrompt, setShowRestorePrompt] = useState(false);
+  /** Feedback for the backup import, shown inside the startup dialog. */
+  const [importFeedback, setImportFeedback] = useState<{
+    phase: "idle" | "picking" | "busy" | "success" | "error";
+    message: string;
+  }>({ phase: "idle", message: "" });
   const [hitWorkSeconds, setHitWorkSeconds] = useState(40);
   const [hitRestSeconds, setHitRestSeconds] = useState(20);
   const [prepSecondsSetting, setPrepSecondsSetting] = useState(10);
@@ -739,6 +746,14 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     if (history.loggedDays === 0 && !dismissed) {
       setShowRestorePrompt(true);
     }
+
+    // Confirmation from a restore that happened just before this reload.
+    const lastRestore = localStorage.getItem(lastRestoreStorageKey);
+    if (lastRestore) {
+      localStorage.removeItem(lastRestoreStorageKey);
+      setStatusText(lastRestore);
+      setShowRestorePrompt(false);
+    }
   }, []);
 
   // Keep the history/export hints in sync as sessions are logged.
@@ -748,6 +763,26 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     }
     setHistoryInfo(readLocalHistory());
   }, [statsVersion]);
+
+  /**
+   * The file picker fires "cancel" when it is dismissed without a selection.
+   * Without this the dialog would keep showing "waiting for file" forever and
+   * the user could not tell whether anything had been loaded.
+   * Attached imperatively because React's typings have no onCancel for inputs.
+   */
+  useEffect(() => {
+    const input = offlineImportRef.current;
+    if (!input) {
+      return;
+    }
+    const onCancel = () =>
+      setImportFeedback({
+        phase: "error",
+        message: "Keine Datei ausgewählt – es wurde nichts geladen.",
+      });
+    input.addEventListener("cancel", onCancel);
+    return () => input.removeEventListener("cancel", onCancel);
+  }, []);
 
   // Hydrate the list-shaping stores after mount to avoid an SSR mismatch.
   useEffect(() => {
@@ -2632,14 +2667,18 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   };
 
   const triggerOfflineImport = () => {
+    setImportFeedback({ phase: "picking", message: "Warte auf Dateiauswahl ..." });
     offlineImportRef.current?.click();
   };
 
   const handleOfflineImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) {
+      setImportFeedback({ phase: "idle", message: "" });
       return;
     }
+
+    setImportFeedback({ phase: "busy", message: `Lese ${file.name} ...` });
 
     try {
       const text = await file.text();
@@ -2648,17 +2687,29 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       const touched = summary.daysAdded + summary.daysUpdated + summary.documentsMerged;
 
       if (touched === 0 && summary.daysKept === 0) {
-        setErrorText("Die Datei enthält keine Momentum-Daten.");
+        const message = "Die Datei enthält keine Momentum-Daten.";
+        setErrorText(message);
+        setImportFeedback({ phase: "error", message });
         return;
       }
 
-      setStatusText(formatRestoreSummary(summary));
+      const summaryText = formatRestoreSummary(summary);
+      // Survives the reload below, so the confirmation is still visible once
+      // the app comes back up with the restored data.
+      localStorage.setItem(lastRestoreStorageKey, summaryText);
+      setStatusText(summaryText);
       setErrorText("");
+      setImportFeedback({
+        phase: "success",
+        message: `${summaryText} – wird geöffnet ...`,
+      });
       // A reload is the safest way to re-hydrate every piece of state from the
       // restored storage without stale values lingering in memory.
-      window.setTimeout(() => window.location.reload(), 1200);
+      window.setTimeout(() => window.location.reload(), 1400);
     } catch (error) {
-      setErrorText(`Import fehlgeschlagen: ${String(error)}`);
+      const message = `Import fehlgeschlagen: ${String(error)}`;
+      setErrorText(message);
+      setImportFeedback({ phase: "error", message });
     } finally {
       event.target.value = "";
     }
@@ -3264,23 +3315,46 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
               zusammengeführt, nichts überschrieben.
             </p>
 
+            {importFeedback.phase !== "idle" ? (
+              <p
+                role="status"
+                aria-live="polite"
+                className={`mt-3 rounded-lg px-3 py-2 text-xs font-bold ${
+                  importFeedback.phase === "success"
+                    ? "bg-emerald-100 text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200"
+                    : importFeedback.phase === "error"
+                      ? "bg-rose-100 text-rose-900 dark:bg-rose-950/60 dark:text-rose-200"
+                      : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                }`}
+              >
+                {importFeedback.phase === "success" ? "✓ " : ""}
+                {importFeedback.message}
+              </p>
+            ) : null}
+
             <div className="mt-4 grid gap-2">
               <button
                 type="button"
+                disabled={importFeedback.phase === "busy" || importFeedback.phase === "success"}
                 onClick={() => {
                   triggerOfflineImport();
                 }}
-                className="min-h-12 w-full touch-manipulation rounded-xl bg-indigo-700 text-sm font-black text-white"
+                className="min-h-12 w-full touch-manipulation rounded-xl bg-indigo-700 text-sm font-black text-white disabled:opacity-50"
               >
-                Backup-Datei laden
+                {importFeedback.phase === "busy"
+                  ? "Wird geladen ..."
+                  : importFeedback.phase === "error"
+                    ? "Andere Datei wählen"
+                    : "Backup-Datei laden"}
               </button>
               <button
                 type="button"
+                disabled={importFeedback.phase === "busy" || importFeedback.phase === "success"}
                 onClick={() => {
                   localStorage.setItem(restorePromptDismissedKey, "1");
                   setShowRestorePrompt(false);
                 }}
-                className="min-h-12 w-full touch-manipulation rounded-xl border border-slate-300 text-sm font-semibold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                className="min-h-12 w-full touch-manipulation rounded-xl border border-slate-300 text-sm font-semibold text-slate-700 disabled:opacity-50 dark:border-slate-600 dark:text-slate-200"
               >
                 Ohne alte Daten starten
               </button>
