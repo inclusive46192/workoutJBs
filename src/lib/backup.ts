@@ -125,6 +125,19 @@ function safeParse(value: string): unknown {
   }
 }
 
+/**
+ * Keys that must never leave the device.
+ *
+ * `momentum-auth:*` holds the Supabase session including access and refresh
+ * tokens. Putting it in a backup would ship credentials into a cloud row and
+ * into an export file that the user may store in iCloud or share - and
+ * restoring one would hijack the session on another device.
+ * `momentum-sync:*` is local bookkeeping that is rebuilt on import.
+ */
+function isExcludedFromBackup(storageKey: string): boolean {
+  return storageKey.startsWith("momentum-auth:") || storageKey.startsWith("momentum-sync:");
+}
+
 export function buildBackupBundle(): BackupBundle {
   const revisions = readRevisions();
   const fallback = new Date().toISOString();
@@ -134,7 +147,7 @@ export function buildBackupBundle(): BackupBundle {
   const documents: Record<string, unknown> = {};
 
   for (const storageKey of Object.keys(localStorage)) {
-    if (!storageKey.startsWith("momentum-")) {
+    if (!storageKey.startsWith("momentum-") || isExcludedFromBackup(storageKey)) {
       continue;
     }
     const value = localStorage.getItem(storageKey);
@@ -163,11 +176,6 @@ export function buildBackupBundle(): BackupBundle {
         value,
         updatedAt: revisionFor(revisions, storageKey, fallback),
       });
-      continue;
-    }
-
-    // Internal sync bookkeeping is rebuilt on import, never shipped.
-    if (storageKey.startsWith("momentum-sync:")) {
       continue;
     }
 
@@ -207,6 +215,11 @@ export type LocalHistory = {
 
 const lastExportKey = "momentum-sync:last-export:v1";
 
+/**
+ * Records that the data is safe somewhere off this device. Both the file
+ * export and a confirmed cloud upload count, otherwise the reminder keeps
+ * nagging after a successful sync.
+ */
 export function markExported() {
   try {
     localStorage.setItem(lastExportKey, new Date().toISOString());
@@ -442,7 +455,8 @@ export function restoreBackupBundle(
   if (parsed.data && Array.isArray(parsed.data.days)) {
     if (mode === "replace") {
       for (const key of Object.keys(localStorage)) {
-        if (key.startsWith("momentum-") && !key.startsWith("momentum-sync:")) {
+        // Never clear the live session while replacing data.
+        if (key.startsWith("momentum-") && !isExcludedFromBackup(key)) {
           localStorage.removeItem(key);
         }
       }
@@ -497,7 +511,8 @@ export function restoreBackupBundle(
     }
 
     for (const [storageKey, value] of Object.entries(parsed.data.documents ?? {})) {
-      if (!storageKey.startsWith("momentum-")) {
+      // Older bundles may still carry a session; refuse to restore it.
+      if (!storageKey.startsWith("momentum-") || isExcludedFromBackup(storageKey)) {
         continue;
       }
       if (mergeDocument(storageKey, value)) {
@@ -511,7 +526,7 @@ export function restoreBackupBundle(
   // v2: raw localStorage snapshot.
   if (parsed.records) {
     for (const [storageKey, value] of Object.entries(parsed.records)) {
-      if (!storageKey.startsWith("momentum-")) {
+      if (!storageKey.startsWith("momentum-") || isExcludedFromBackup(storageKey)) {
         continue;
       }
       const isDay = storageKey.startsWith(dayKeyPrefix);

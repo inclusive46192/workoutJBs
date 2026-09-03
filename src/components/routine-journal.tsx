@@ -16,8 +16,7 @@ import {
   touchRevision,
   type LocalHistory,
   type RestoreSummary,
-} from "@/lib/backup";
-import { ExerciseAnimation } from "@/components/exercise-animation";
+} from "@/lib/backup";import { ExerciseAnimation } from "@/components/exercise-animation";
 import { getCategoryProfile } from "@/lib/category-profiles";
 import { normalizeSetKind, setKinds, type SetKind } from "@/lib/set-types";
 import { presetRoutines, type PresetRoutine } from "@/lib/preset-routines";
@@ -617,6 +616,10 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   );
   const [cloudBusy, setCloudBusy] = useState(false);
   const [cloudMessage, setCloudMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(
+    null,
+  );
+  /** Always-visible sync outcome, shown next to the backup buttons. */
+  const [cloudState, setCloudState] = useState<{ tone: "ok" | "error"; text: string } | null>(
     null,
   );
   const [hitWorkSeconds, setHitWorkSeconds] = useState(40);
@@ -2769,26 +2772,42 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     setCloudBusy(false);
 
     if (!result.ok) {
+      // Errors are never silent: a failed backup the user cannot see is worse
+      // than no backup at all.
       setCloudMessage({ tone: "error", text: result.error });
+      setCloudState({ tone: "error", text: `Cloud-Sync fehlgeschlagen: ${result.error}` });
       return;
     }
+
+    // A confirmed upload counts as a backup, so the export reminder stops.
+    markExported();
+    const stamp = new Date().toLocaleTimeString("de-DE", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
     if (result.kind === "pulled") {
       const { daysAdded, daysUpdated } = result.summary;
       const changed = daysAdded + daysUpdated;
-      setCloudMessage({
-        tone: "ok",
-        text:
-          changed > 0
-            ? `Cloud geladen: ${daysAdded} ergänzt, ${daysUpdated} aktualisiert.`
-            : "Cloud ist auf dem aktuellen Stand.",
-      });
+      const text =
+        changed > 0
+          ? `Cloud geladen: ${daysAdded} ergänzt, ${daysUpdated} aktualisiert.`
+          : "Cloud ist auf dem aktuellen Stand.";
+      setCloudMessage({ tone: "ok", text });
+      setCloudState({ tone: "ok", text: `Cloud synchronisiert (${stamp})` });
       if (changed > 0) {
         // Re-read storage so the dashboard reflects the merged history.
         setStatsVersion((current) => current + 1);
-        setHistoryInfo(readLocalHistory());
       }
+      setHistoryInfo(readLocalHistory());
       return;
     }
+
+    setCloudState({
+      tone: "ok",
+      text: `Cloud gesichert: ${result.kind === "pushed" ? result.dayCount : 0} Tage (${stamp})`,
+    });
+    setHistoryInfo(readLocalHistory());
     if (!silent) {
       setCloudMessage({ tone: "ok", text: "In der Cloud gesichert." });
     }
@@ -5861,6 +5880,21 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
             Änderungen werden automatisch gespeichert.
           </span>
         </div>
+
+        {cloudState ? (
+          <p
+            role="status"
+            aria-live="polite"
+            className={`mt-2 rounded-lg px-3 py-2 text-xs font-bold ${
+              cloudState.tone === "error"
+                ? "bg-rose-100 text-rose-900 dark:bg-rose-950/60 dark:text-rose-200"
+                : "bg-emerald-100 text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200"
+            }`}
+          >
+            {cloudState.tone === "ok" ? "✓ " : "⚠ "}
+            {cloudState.text}
+          </p>
+        ) : null}
 
         {exportReminder ? (
           <p className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
