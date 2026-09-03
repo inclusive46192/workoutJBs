@@ -655,6 +655,8 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
 
   const [exerciseCustomSeconds, setExerciseCustomSeconds] = useState<ExerciseSecondMap>({});
   const [halfwayAlertEnabled, setHalfwayAlertEnabled] = useState(false);
+  /** Per-exercise halfway cue; overrides the global toggle when set. */
+  const [halfwayByExercise, setHalfwayByExercise] = useState<Record<string, boolean>>({});
   const [showJournalArchive, setShowJournalArchive] = useState(false);
   const [journalArchive, setJournalArchive] = useState<JournalArchiveEntry[]>([]);
   const [expandedArchiveKeys, setExpandedArchiveKeys] = useState<Set<string>>(new Set());
@@ -1027,10 +1029,16 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     const rawSignals = localStorage.getItem(signalPrefsStorageKey);
     if (rawSignals) {
       try {
-        const parsed = JSON.parse(rawSignals) as { sound?: boolean; halfway?: boolean; rest?: number };
+        const parsed = JSON.parse(rawSignals) as {
+          sound?: boolean;
+          halfway?: boolean;
+          rest?: number;
+          halfwayByExercise?: Record<string, boolean>;
+        };
         if (parsed.sound !== undefined) setSoundEnabled(parsed.sound);
         if (parsed.halfway !== undefined) setHalfwayAlertEnabled(parsed.halfway);
         if (parsed.rest !== undefined) setRestTimerSeconds(parsed.rest);
+        if (parsed.halfwayByExercise) setHalfwayByExercise(parsed.halfwayByExercise);
       } catch {
         // ignore malformed settings
       }
@@ -1082,10 +1090,15 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     }
     localStorage.setItem(
       signalPrefsStorageKey,
-      JSON.stringify({ sound: soundEnabled, halfway: halfwayAlertEnabled, rest: restTimerSeconds }),
+      JSON.stringify({
+        sound: soundEnabled,
+        halfway: halfwayAlertEnabled,
+        rest: restTimerSeconds,
+        halfwayByExercise,
+      }),
     );
     setSignalsEnabled(soundEnabled);
-  }, [halfwayAlertEnabled, restTimerSeconds, soundEnabled]);
+  }, [halfwayAlertEnabled, halfwayByExercise, restTimerSeconds, soundEnabled]);
 
   // Rest timer between strength sets: fires once when it reaches zero.
   useEffect(() => {
@@ -1945,7 +1958,8 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     cancelCuesRef.current = schedulePhaseCues({
       durationSeconds: seconds,
       profile: intervalSettings.profile,
-      halfway: halfwayAlertEnabled,
+      // Per-exercise setting wins; the global toggle is the fallback.
+      halfway: halfwayByExercise[exercise] ?? halfwayAlertEnabled,
     });
     setStatusText(`${exercise} läuft.`);
     setErrorText("");
@@ -2787,18 +2801,32 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     });
 
     if (result.kind === "pulled") {
-      const { daysAdded, daysUpdated } = result.summary;
-      const changed = daysAdded + daysUpdated;
-      const text =
-        changed > 0
-          ? `Cloud geladen: ${daysAdded} ergänzt, ${daysUpdated} aktualisiert.`
-          : "Cloud ist auf dem aktuellen Stand.";
-      setCloudMessage({ tone: "ok", text });
-      setCloudState({ tone: "ok", text: `Cloud synchronisiert (${stamp})` });
+      const { daysAdded, daysUpdated, documentsMerged } = result.summary;
+      const changed = daysAdded + daysUpdated + documentsMerged;
+
       if (changed > 0) {
-        // Re-read storage so the dashboard reflects the merged history.
-        setStatsVersion((current) => current + 1);
+        /**
+         * The merge wrote straight to localStorage, but routines, exercise
+         * selections and order live in React state that was hydrated earlier.
+         * Leaving them stale would not just show outdated lists - the next
+         * save would write the stale copy back and destroy what was pulled.
+         * A reload is the only reliable way to rebuild every store, and it
+         * terminates because a second sync finds nothing left to change.
+         */
+        setCloudState({
+          tone: "ok",
+          text: `Cloud geladen: ${daysAdded} Tage ergänzt, ${daysUpdated} aktualisiert – wird geöffnet ...`,
+        });
+        localStorage.setItem(
+          lastRestoreStorageKey,
+          `Cloud geladen: ${daysAdded} Tage ergänzt, ${daysUpdated} aktualisiert.`,
+        );
+        window.setTimeout(() => window.location.reload(), 1200);
+        return;
       }
+
+      setCloudMessage({ tone: "ok", text: "Cloud ist auf dem aktuellen Stand." });
+      setCloudState({ tone: "ok", text: `Cloud synchronisiert (${stamp})` });
       setHistoryInfo(readLocalHistory());
       return;
     }
@@ -4977,6 +5005,22 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                               }
                               className="min-h-11 rounded-md border border-slate-300 px-2 text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
                             />
+                          </label>
+                        ) : null}
+                        {isIntervalCategory ? (
+                          <label className="flex min-h-11 items-center gap-2 self-end rounded-md border border-slate-300 px-2 text-xs font-medium text-slate-900 dark:border-slate-700 dark:text-slate-100">
+                            <input
+                              type="checkbox"
+                              checked={halfwayByExercise[entry.exercise] ?? halfwayAlertEnabled}
+                              onChange={(event) =>
+                                setHalfwayByExercise((current) => ({
+                                  ...current,
+                                  [entry.exercise]: event.target.checked,
+                                }))
+                              }
+                              className="h-4 w-4"
+                            />
+                            Halbzeit-Signal
                           </label>
                         ) : null}
                         {isSetsCategory ? (

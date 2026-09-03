@@ -320,6 +320,23 @@ function writeValue(storageKey: string, value: unknown): boolean {
   return true;
 }
 
+/**
+ * Writes only when the content really differs and reports whether it did.
+ * Callers use this to decide whether a reload is needed, so "changed" must
+ * mean changed - otherwise a no-op sync would trigger an endless reload loop.
+ */
+function writeIfChanged(storageKey: string, value: unknown): boolean {
+  const serialised = typeof value === "string" ? value : JSON.stringify(value);
+  if (serialised === undefined) {
+    return false;
+  }
+  if (localStorage.getItem(storageKey) === serialised) {
+    return false;
+  }
+  localStorage.setItem(storageKey, serialised);
+  return true;
+}
+
 export type RestoreMode = "merge" | "replace";
 
 export type RestoreSummary = {
@@ -373,14 +390,14 @@ function countCompleted(payload: unknown): number {
 function mergeDocument(storageKey: string, incoming: unknown): boolean {
   const rawLocal = localStorage.getItem(storageKey);
   if (rawLocal === null) {
-    return writeValue(storageKey, incoming);
+    return writeIfChanged(storageKey, incoming);
   }
 
   let local: unknown;
   try {
     local = JSON.parse(rawLocal);
   } catch {
-    return writeValue(storageKey, incoming);
+    return writeIfChanged(storageKey, incoming);
   }
 
   // Goals and journal entries: union by a stable identity.
@@ -398,7 +415,7 @@ function mergeDocument(storageKey: string, incoming: unknown): boolean {
     for (const item of local as Array<Record<string, unknown>>) {
       byId.set(identity(item), item);
     }
-    return writeValue(storageKey, Array.from(byId.values()));
+    return writeIfChanged(storageKey, Array.from(byId.values()));
   }
 
   // Per-category maps (routines, custom/hidden exercises, order).
@@ -430,7 +447,7 @@ function mergeDocument(storageKey: string, incoming: unknown): boolean {
       }
       merged[key] = value;
     }
-    return writeValue(storageKey, merged);
+    return writeIfChanged(storageKey, merged);
   }
 
   // Scalars and settings: the local device configuration wins.
@@ -490,9 +507,16 @@ export function restoreBackupBundle(
         (incomingCompleted === localCompleted && incomingIsNewer(day.updatedAt, storageKey));
 
       if (preferIncoming) {
-        writeValue(storageKey, day.payload);
+        // Count as "updated" only on a real content change: an identical day
+        // with a newer timestamp must not look like a change, or a caller that
+        // reloads on change would loop forever.
+        const didChange = writeIfChanged(storageKey, day.payload);
         setRevision(storageKey, day.updatedAt);
-        summary.daysUpdated += 1;
+        if (didChange) {
+          summary.daysUpdated += 1;
+        } else {
+          summary.daysKept += 1;
+        }
       } else {
         summary.daysKept += 1;
       }
