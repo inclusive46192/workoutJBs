@@ -185,6 +185,8 @@ const signalPrefsStorageKey = "momentum-signals:prefs:v1";
 const lastSetValuesStorageKey = "momentum-sets:last-values:v1";
 const goalsStorageKey = "momentum-goals:v1";
 const restorePromptDismissedKey = "momentum-sync:restore-prompt-dismissed:v1";
+/** Preset routines the user deleted; kept so they are not re-seeded on start. */
+const removedPresetsStorageKey = "momentum-builder:removed-presets:v1";
 /** One-shot message that survives the reload after a restore. */
 const lastRestoreStorageKey = "momentum-sync:last-restore:v1";
 /** Upper bound for sets seeded from a preset or default. */
@@ -654,6 +656,11 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   const cancelCuesRef = useRef<() => void>(() => {});
 
   const [exerciseCustomSeconds, setExerciseCustomSeconds] = useState<ExerciseSecondMap>({});
+  /**
+   * In-progress text for the seconds inputs. Keeping the raw string lets the
+   * field be emptied entirely; the value is normalised on blur.
+   */
+  const [secondsDraft, setSecondsDraft] = useState<Record<string, string>>({});
   const [halfwayAlertEnabled, setHalfwayAlertEnabled] = useState(false);
   /** Per-exercise halfway cue; overrides the global toggle when set. */
   const [halfwayByExercise, setHalfwayByExercise] = useState<Record<string, boolean>>({});
@@ -671,6 +678,25 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     Record<string, WorkoutBuilderTemplate[]>
   >({});
   const [workoutBuilderName, setWorkoutBuilderName] = useState("");
+  /** Name awaiting an overwrite confirmation, null when nothing is pending. */
+  const [pendingOverwriteName, setPendingOverwriteName] = useState<string | null>(null);
+  /** Routine awaiting a delete confirmation. */
+  const [pendingDeleteName, setPendingDeleteName] = useState<string | null>(null);
+  /** Short-lived confirmation after saving or deleting a routine. */
+  const [saveConfirmation, setSaveConfirmation] = useState<string | null>(null);
+  /** Deleted preset names per category, so they stay deleted. */
+  const [removedPresets, setRemovedPresets] = useState<Record<string, string[]>>({});
+  /** HIT set awaiting an overwrite confirmation. */
+  const [pendingHitOverwriteName, setPendingHitOverwriteName] = useState<string | null>(null);
+  /** HIT set awaiting a delete confirmation. */
+  const [pendingHitDeleteName, setPendingHitDeleteName] = useState<string | null>(null);
+  /** Short-lived confirmation after saving or deleting a HIT set. */
+  const [hitSetConfirmation, setHitSetConfirmation] = useState<string | null>(null);
+  /**
+   * Guards the preset seeding until the stored state has been read. Without
+   * this the seeding effect runs first and re-adds presets the user deleted.
+   */
+  const [storesHydrated, setStoresHydrated] = useState(false);
   const [selectedWorkoutBuilderName, setSelectedWorkoutBuilderName] = useState("");
   const [routineComposerByCategory, setRoutineComposerByCategory] = useState<Record<string, string[]>>(
     {},
@@ -966,6 +992,23 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     setHistoryInfo(readLocalHistory());
   };
 
+  // Let the save/delete confirmation fade out on its own.
+  useEffect(() => {
+    if (!saveConfirmation) {
+      return;
+    }
+    const timeout = window.setTimeout(() => setSaveConfirmation(null), 4000);
+    return () => window.clearTimeout(timeout);
+  }, [saveConfirmation]);
+
+  useEffect(() => {
+    if (!hitSetConfirmation) {
+      return;
+    }
+    const timeout = window.setTimeout(() => setHitSetConfirmation(null), 4000);
+    return () => window.clearTimeout(timeout);
+  }, [hitSetConfirmation]);
+
   useEffect(() => {
     const isTicking =
       intervalPhase === "prep" || intervalPhase === "work" || intervalPhase === "rest";
@@ -1030,6 +1073,15 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       }
     }
 
+    const rawRemovedPresets = localStorage.getItem(removedPresetsStorageKey);
+    if (rawRemovedPresets) {
+      try {
+        setRemovedPresets(JSON.parse(rawRemovedPresets) as Record<string, string[]>);
+      } catch {
+        // ignore malformed list
+      }
+    }
+
     const rawRoutineComposer = localStorage.getItem(routineComposerStorageKey);
     if (rawRoutineComposer) {
       try {
@@ -1047,9 +1099,15 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
         setErrorText(`Quick-Load konnte nicht geladen werden: ${String(error)}`);
       }
     }
+
+    // Everything above is loaded; preset seeding may now run safely.
+    setStoresHydrated(true);
   }, []);
 
   useEffect(() => {
+    if (!storesHydrated) {
+      return;
+    }
     setWorkoutBuilderTemplates((current) => {
       const merged: Record<string, WorkoutBuilderTemplate[]> = { ...current };
       let changed = false;
@@ -1057,7 +1115,12 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       for (const [category, defaults] of Object.entries(defaultWorkoutBuilderTemplates)) {
         const existing = merged[category] ?? [];
         const existingNames = new Set(existing.map((item) => item.name));
-        const missingDefaults = defaults.filter((item) => !existingNames.has(item.name));
+        const removed = new Set(removedPresets[category] ?? []);
+        // Skip presets the user deleted on purpose, otherwise they reappear
+        // on every start and the delete button looks broken.
+        const missingDefaults = defaults.filter(
+          (item) => !existingNames.has(item.name) && !removed.has(item.name),
+        );
         if (missingDefaults.length > 0) {
           merged[category] = [...existing, ...missingDefaults];
           changed = true;
@@ -1070,7 +1133,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
 
       return changed ? merged : current;
     });
-  }, [defaultWorkoutBuilderTemplates]);
+  }, [defaultWorkoutBuilderTemplates, removedPresets, storesHydrated]);
 
   useEffect(() => {
     if (hitCurrentRound > hitTargetRounds) {
@@ -1996,6 +2059,40 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   const getWorkSecondsFor = (exercise: string) =>
     getExerciseTargetSeconds(exerciseCustomSeconds, exercise, intervalSettings.defaultWorkSeconds);
 
+  /** Clamped write of a seconds value, shared by the steppers and the input. */
+  const setExerciseSeconds = (exercise: string, seconds: number) => {
+    const clamped = Math.min(600, Math.max(5, seconds));
+    setExerciseCustomSeconds((current) => ({ ...current, [exercise]: clamped }));
+    setSecondsDraft((current) => ({ ...current, [exercise]: String(clamped) }));
+  };
+
+  const adjustExerciseSeconds = (exercise: string, delta: number) => {
+    setExerciseSeconds(exercise, getWorkSecondsFor(exercise) + delta);
+  };
+
+  /** Normalises the free-text draft; an empty field falls back to the default. */
+  const commitSecondsDraft = (exercise: string) => {
+    const raw = secondsDraft[exercise];
+    if (raw === undefined) {
+      return;
+    }
+    if (raw.trim() === "") {
+      // Empty means "use the category/exercise default" rather than 0.
+      setExerciseCustomSeconds((current) => {
+        const next = { ...current };
+        delete next[exercise];
+        return next;
+      });
+      setSecondsDraft((current) => {
+        const next = { ...current };
+        delete next[exercise];
+        return next;
+      });
+      return;
+    }
+    setExerciseSeconds(exercise, Number.parseInt(raw, 10) || 5);
+  };
+
   const resolveNextIntervalStep = (
     currentExercise: string | null,
     round: number,
@@ -2441,16 +2538,30 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     });
   };
 
-  const saveWorkoutBuilderTemplate = () => {
+  /**
+   * Saves the current builder state as a routine.
+   * `confirmedOverwrite` is set by the confirmation dialog, so an existing
+   * routine is never silently replaced.
+   */
+  const saveWorkoutBuilderTemplate = (confirmedOverwrite = false) => {
     const trimmed = workoutBuilderName.trim();
     if (!trimmed) {
-      setErrorText("Bitte einen Namen für den Workout-Builder eingeben.");
+      setErrorText("Bitte einen Namen für die Routine eingeben.");
       return;
     }
 
     const selectedEntries = builderEntries.filter((entry) => !hiddenExercises.includes(entry.exercise));
     if (selectedEntries.length === 0) {
-      setErrorText("Bitte mindestens eine Übung im Workout-Builder aktivieren.");
+      setErrorText("Bitte mindestens eine Übung aktivieren.");
+      return;
+    }
+
+    const existing = (workoutBuilderTemplates[selectedCategory] ?? []).some(
+      (item) => item.name === trimmed,
+    );
+    if (existing && !confirmedOverwrite) {
+      setPendingOverwriteName(trimmed);
+      setErrorText("");
       return;
     }
 
@@ -2459,6 +2570,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       category: selectedCategory,
       entries: selectedEntries,
       exerciseCustomSeconds,
+      lastUsedAt: new Date().toISOString(),
     };
 
     setWorkoutBuilderTemplates((current) => {
@@ -2469,11 +2581,74 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       ];
       const next = { ...current, [selectedCategory]: nextCategory };
       localStorage.setItem(workoutBuilderTemplatesStorageKey, JSON.stringify(next));
+      touchRevision(workoutBuilderTemplatesStorageKey);
       return next;
     });
     setSelectedWorkoutBuilderName(trimmed);
-    setStatusText(`Workout-Builder "${trimmed}" gespeichert.`);
+    setPendingOverwriteName(null);
+    // Saving under a preset's name means the user wants it back.
+    setRemovedPresets((current) => {
+      const forCategory = current[selectedCategory] ?? [];
+      if (!forCategory.includes(trimmed)) {
+        return current;
+      }
+      const next = {
+        ...current,
+        [selectedCategory]: forCategory.filter((item) => item !== trimmed),
+      };
+      localStorage.setItem(removedPresetsStorageKey, JSON.stringify(next));
+      return next;
+    });
+    setSaveConfirmation(
+      existing
+        ? `Routine "${trimmed}" überschrieben · ${selectedEntries.length} Übungen`
+        : `Routine "${trimmed}" gespeichert · ${selectedEntries.length} Übungen`,
+    );
+    setStatusText("");
     setErrorText("");
+    // Trigger the cloud push so a saved routine is backed up too.
+    setStatsVersion((current) => current + 1);
+  };
+
+  const deleteWorkoutBuilderTemplate = (name: string) => {
+    setWorkoutBuilderTemplates((current) => {
+      const categoryTemplates = current[selectedCategory] ?? [];
+      const nextCategory = categoryTemplates.filter((item) => item.name !== name);
+      const next = { ...current, [selectedCategory]: nextCategory };
+      localStorage.setItem(workoutBuilderTemplatesStorageKey, JSON.stringify(next));
+      touchRevision(workoutBuilderTemplatesStorageKey);
+      return next;
+    });
+
+    // If this was a built-in preset, remember the deletion: the seeding effect
+    // would otherwise add it straight back on the next start.
+    const isPreset = (defaultWorkoutBuilderTemplates[selectedCategory] ?? []).some(
+      (item) => item.name === name,
+    );
+    if (isPreset) {
+      setRemovedPresets((current) => {
+        const forCategory = new Set(current[selectedCategory] ?? []);
+        forCategory.add(name);
+        const next = { ...current, [selectedCategory]: Array.from(forCategory) };
+        localStorage.setItem(removedPresetsStorageKey, JSON.stringify(next));
+        return next;
+      });
+    }
+
+    // Drop it from the combine selection as well, otherwise it lingers there.
+    setRoutineComposerByCategory((current) => {
+      const selected = (current[selectedCategory] ?? []).filter((item) => item !== name);
+      const next = { ...current, [selectedCategory]: selected };
+      localStorage.setItem(routineComposerStorageKey, JSON.stringify(next));
+      return next;
+    });
+    if (selectedWorkoutBuilderName === name) {
+      setSelectedWorkoutBuilderName("");
+    }
+    setPendingDeleteName(null);
+    setSaveConfirmation(`Routine "${name}" gelöscht`);
+    setErrorText("");
+    setStatsVersion((current) => current + 1);
   };
 
   /**
@@ -2544,6 +2719,8 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       return [...ordered, ...rest];
     });
     setExerciseCustomSeconds(template.exerciseCustomSeconds ?? {});
+    // Drop in-progress text so the fields show the loaded routine's values.
+    setSecondsDraft({});
     if (template.intervals) {
       // Tabata and generic HIT share a category but need different timing.
       setHitWorkSeconds(template.intervals.workSeconds);
@@ -2656,7 +2833,12 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     advanceHitRound();
   };
 
-  const saveHitWorkoutSet = () => {
+  /**
+   * Saves the current HIT exercises as a named set.
+   * `confirmedOverwrite` comes from the confirmation prompt so an existing set
+   * is never replaced silently - same contract as the routine builder.
+   */
+  const saveHitWorkoutSet = (confirmedOverwrite = false) => {
     if (!isHitWorkout) {
       setErrorText("Workout-Sets können nur in HIT Workouts gespeichert werden.");
       return;
@@ -2679,17 +2861,48 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       return;
     }
 
+    const existing = hitWorkoutSets.some((setItem) => setItem.name === trimmed);
+    if (existing && !confirmedOverwrite) {
+      setPendingHitOverwriteName(trimmed);
+      setErrorText("");
+      return;
+    }
+
     setHitWorkoutSets((current) => {
       const next = [
         ...current.filter((setItem) => setItem.name !== trimmed),
         { name: trimmed, items: filteredItems },
       ];
       localStorage.setItem(hitWorkoutSetsStorageKey, JSON.stringify(next));
+      touchRevision(hitWorkoutSetsStorageKey);
       return next;
     });
     setSelectedHitSetName(trimmed);
-    setStatusText(`HIT-Set "${trimmed}" gespeichert.`);
+    setPendingHitOverwriteName(null);
+    setHitSetConfirmation(
+      existing
+        ? `HIT-Set "${trimmed}" überschrieben · ${filteredItems.length} Übungen`
+        : `HIT-Set "${trimmed}" gespeichert · ${filteredItems.length} Übungen`,
+    );
+    setStatusText("");
     setErrorText("");
+    setStatsVersion((current) => current + 1);
+  };
+
+  const deleteHitWorkoutSet = (name: string) => {
+    setHitWorkoutSets((current) => {
+      const next = current.filter((setItem) => setItem.name !== name);
+      localStorage.setItem(hitWorkoutSetsStorageKey, JSON.stringify(next));
+      touchRevision(hitWorkoutSetsStorageKey);
+      return next;
+    });
+    if (selectedHitSetName === name) {
+      setSelectedHitSetName("");
+    }
+    setPendingHitDeleteName(null);
+    setHitSetConfirmation(`HIT-Set "${name}" gelöscht`);
+    setErrorText("");
+    setStatsVersion((current) => current + 1);
   };
 
   const loadHitWorkoutSet = (nameOverride?: string) => {
@@ -5069,24 +5282,62 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
 
                       <div className="mt-2 grid gap-2 sm:grid-cols-3">
                         {isIntervalCategory ? (
-                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100">
+                          <label className="flex flex-col gap-1 text-xs font-medium text-slate-900 dark:text-slate-100 sm:col-span-3">
                             Sekunden
-                            <input
-                              type="number"
-                              min={5}
-                              max={600}
-                              value={getWorkSecondsFor(entry.exercise)}
-                              onChange={(event) =>
-                                setExerciseCustomSeconds((current) => ({
-                                  ...current,
-                                  [entry.exercise]: Math.max(
-                                    5,
-                                    Number.parseInt(event.target.value || "5", 10),
-                                  ),
-                                }))
-                              }
-                              className="min-h-11 rounded-md border border-slate-300 px-2 text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
-                            />
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => adjustExerciseSeconds(entry.exercise, -30)}
+                                aria-label="30 Sekunden weniger"
+                                className="min-h-11 w-12 shrink-0 rounded-md border border-slate-400 text-xs font-bold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                              >
+                                −30
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => adjustExerciseSeconds(entry.exercise, -10)}
+                                aria-label="10 Sekunden weniger"
+                                className="min-h-11 w-12 shrink-0 rounded-md border border-slate-400 text-xs font-bold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                              >
+                                −10
+                              </button>
+                              <input
+                                // Free text while editing so the field can be
+                                // cleared completely; a number input keeps the
+                                // last digit and is painful to retype on a phone.
+                                type="text"
+                                inputMode="numeric"
+                                value={
+                                  secondsDraft[entry.exercise] ??
+                                  String(getWorkSecondsFor(entry.exercise))
+                                }
+                                onChange={(event) => {
+                                  const digits = event.target.value.replace(/\D/g, "");
+                                  setSecondsDraft((current) => ({
+                                    ...current,
+                                    [entry.exercise]: digits,
+                                  }));
+                                }}
+                                onBlur={() => commitSecondsDraft(entry.exercise)}
+                                className="min-h-11 w-full min-w-0 rounded-md border border-slate-300 px-2 text-center text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => adjustExerciseSeconds(entry.exercise, 10)}
+                                aria-label="10 Sekunden mehr"
+                                className="min-h-11 w-12 shrink-0 rounded-md border border-slate-400 text-xs font-bold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                              >
+                                +10
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => adjustExerciseSeconds(entry.exercise, 30)}
+                                aria-label="30 Sekunden mehr"
+                                className="min-h-11 w-12 shrink-0 rounded-md border border-slate-400 text-xs font-bold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                              >
+                                +30
+                              </button>
+                            </div>
                           </label>
                         ) : null}
                         {isIntervalCategory ? (
@@ -5214,28 +5465,118 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                 />
                 <button
                   type="button"
-                  onClick={saveWorkoutBuilderTemplate}
+                  onClick={() => saveWorkoutBuilderTemplate()}
                   className="min-h-12 touch-manipulation rounded-xl bg-teal-700 px-4 text-sm font-black text-white"
                 >
                   Speichern
                 </button>
               </div>
 
+              {pendingOverwriteName ? (
+                <div className="mt-2 rounded-lg border border-amber-400 bg-amber-50 p-2.5 dark:border-amber-700 dark:bg-amber-950/50">
+                  <p className="text-xs font-bold text-amber-900 dark:text-amber-200">
+                    „{pendingOverwriteName}“ existiert bereits. Überschreiben?
+                  </p>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => saveWorkoutBuilderTemplate(true)}
+                      className="min-h-11 touch-manipulation rounded-lg bg-amber-600 text-xs font-bold text-white"
+                    >
+                      Ja, überschreiben
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPendingOverwriteName(null)}
+                      className="min-h-11 touch-manipulation rounded-lg border border-slate-400 text-xs font-semibold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                    >
+                      Abbrechen
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {saveConfirmation ? (
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className="mt-2 rounded-lg bg-emerald-100 px-3 py-2 text-xs font-bold text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200"
+                >
+                  ✓ {saveConfirmation}
+                </p>
+              ) : null}
+
               {savedRoutines.length > 0 ? (
                 <div className="mt-3">
                   <p className="text-[11px] font-bold uppercase tracking-wide text-teal-800 dark:text-teal-300">
-                    Bereits gespeichert
+                    Gespeicherte Routinen
                   </p>
-                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  <div className="mt-1.5 grid gap-1.5">
                     {savedRoutines.map((template) => (
-                      <span
+                      <div
                         key={`saved-${template.name}`}
-                        className="rounded-full border border-teal-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-teal-900 dark:border-teal-800 dark:bg-slate-900 dark:text-teal-300"
+                        className="rounded-lg border border-teal-200 bg-white p-2 dark:border-teal-800 dark:bg-slate-900"
                       >
-                        {template.name}
-                      </span>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              // Pre-fill the name so "save" overwrites this one.
+                              setWorkoutBuilderName(template.name);
+                              setSelectedWorkoutBuilderName(template.name);
+                              loadWorkoutBuilderTemplate(template.name);
+                              setSaveConfirmation(null);
+                            }}
+                            className="min-w-0 flex-1 text-left text-xs font-bold text-teal-900 dark:text-teal-300"
+                          >
+                            <span className="break-words">{template.name}</span>
+                            <span className="block font-medium text-slate-500 dark:text-slate-400">
+                              {template.entries.length} Übungen
+                              {template.lastUsedAt
+                                ? ` · zuletzt ${formatLastUsed(template.lastUsedAt)}`
+                                : ""}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPendingDeleteName(template.name)}
+                            aria-label={`${template.name} löschen`}
+                            className="min-h-9 shrink-0 rounded-md border border-rose-300 px-2.5 text-xs font-bold text-rose-700 dark:border-rose-800 dark:text-rose-300"
+                          >
+                            Löschen
+                          </button>
+                        </div>
+
+                        {pendingDeleteName === template.name ? (
+                          <div className="mt-2 rounded-md border border-rose-300 bg-rose-50 p-2 dark:border-rose-800 dark:bg-rose-950/50">
+                            <p className="text-[11px] font-bold text-rose-900 dark:text-rose-200">
+                              „{template.name}“ wirklich löschen?
+                            </p>
+                            <div className="mt-1.5 grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                onClick={() => deleteWorkoutBuilderTemplate(template.name)}
+                                className="min-h-10 touch-manipulation rounded-md bg-rose-600 text-[11px] font-bold text-white"
+                              >
+                                Ja, löschen
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setPendingDeleteName(null)}
+                                className="min-h-10 touch-manipulation rounded-md border border-slate-400 text-[11px] font-semibold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                              >
+                                Abbrechen
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
                     ))}
                   </div>
+                  <p className="mt-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                    Antippen lädt die Routine und übernimmt den Namen – erneutes
+                    Speichern überschreibt sie dann.
+                  </p>
                 </div>
               ) : null}
 
@@ -5630,12 +5971,46 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
               />
               <button
                 type="button"
-                onClick={saveHitWorkoutSet}
+                onClick={() => saveHitWorkoutSet()}
                 className="rounded-lg border border-fuchsia-600 px-3 py-2 text-sm font-semibold text-fuchsia-800 dark:text-fuchsia-300"
               >
                 Set speichern
               </button>
             </div>
+
+            {pendingHitOverwriteName ? (
+              <div className="mt-2 rounded-lg border border-amber-400 bg-amber-50 p-2.5 dark:border-amber-700 dark:bg-amber-950/50">
+                <p className="text-xs font-bold text-amber-900 dark:text-amber-200">
+                  „{pendingHitOverwriteName}“ existiert bereits. Überschreiben?
+                </p>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => saveHitWorkoutSet(true)}
+                    className="min-h-11 touch-manipulation rounded-lg bg-amber-600 text-xs font-bold text-white"
+                  >
+                    Ja, überschreiben
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingHitOverwriteName(null)}
+                    className="min-h-11 touch-manipulation rounded-lg border border-slate-400 text-xs font-semibold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                  >
+                    Abbrechen
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {hitSetConfirmation ? (
+              <p
+                role="status"
+                aria-live="polite"
+                className="mt-2 rounded-lg bg-emerald-100 px-3 py-2 text-xs font-bold text-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-200"
+              >
+                ✓ {hitSetConfirmation}
+              </p>
+            ) : null}
             <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
               <select
                 value={selectedHitSetName}
@@ -5658,17 +6033,72 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
               </button>
             </div>
             {hitWorkoutSets.length > 0 ? (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {hitWorkoutSets.slice(-4).reverse().map((setItem) => (
-                  <button
-                    key={`quick-hit-${setItem.name}`}
-                    type="button"
-                    onClick={() => loadHitWorkoutSet(setItem.name)}
-                    className="rounded-full border border-fuchsia-300 bg-white px-2.5 py-1 text-xs font-semibold text-fuchsia-900 dark:text-fuchsia-200 dark:bg-slate-900 dark:border-fuchsia-800"
-                  >
-                    ⚡ {setItem.name}
-                  </button>
-                ))}
+              <div className="mt-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-fuchsia-800 dark:text-fuchsia-300">
+                  Gespeicherte HIT-Sets
+                </p>
+                <div className="mt-1.5 grid gap-1.5">
+                  {hitWorkoutSets.map((setItem) => (
+                    <div
+                      key={`hit-set-${setItem.name}`}
+                      className="rounded-lg border border-fuchsia-200 bg-white p-2 dark:border-fuchsia-800 dark:bg-slate-900"
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            // Pre-fill the name so saving overwrites this set.
+                            setNewHitSetName(setItem.name);
+                            loadHitWorkoutSet(setItem.name);
+                            setHitSetConfirmation(null);
+                          }}
+                          className="min-w-0 flex-1 text-left text-xs font-bold text-fuchsia-900 dark:text-fuchsia-300"
+                        >
+                          <span className="break-words">⚡ {setItem.name}</span>
+                          <span className="block font-medium text-slate-500 dark:text-slate-400">
+                            {setItem.items.length} Übungen
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPendingHitDeleteName(setItem.name)}
+                          aria-label={`${setItem.name} löschen`}
+                          className="min-h-9 shrink-0 rounded-md border border-rose-300 px-2.5 text-xs font-bold text-rose-700 dark:border-rose-800 dark:text-rose-300"
+                        >
+                          Löschen
+                        </button>
+                      </div>
+
+                      {pendingHitDeleteName === setItem.name ? (
+                        <div className="mt-2 rounded-md border border-rose-300 bg-rose-50 p-2 dark:border-rose-800 dark:bg-rose-950/50">
+                          <p className="text-[11px] font-bold text-rose-900 dark:text-rose-200">
+                            „{setItem.name}“ wirklich löschen?
+                          </p>
+                          <div className="mt-1.5 grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => deleteHitWorkoutSet(setItem.name)}
+                              className="min-h-10 touch-manipulation rounded-md bg-rose-600 text-[11px] font-bold text-white"
+                            >
+                              Ja, löschen
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPendingHitDeleteName(null)}
+                              className="min-h-10 touch-manipulation rounded-md border border-slate-400 text-[11px] font-semibold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                            >
+                              Abbrechen
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                  Antippen lädt das Set und übernimmt den Namen – erneutes
+                  Speichern überschreibt es dann.
+                </p>
               </div>
             ) : null}
           </div>
