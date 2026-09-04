@@ -40,7 +40,7 @@ import {
 } from "@/lib/goals";
 import { useWakeLock } from "@/hooks/use-wake-lock";
 import { useAuth, type AuthProvider } from "@/hooks/use-auth";
-import { syncWithCloud } from "@/lib/cloud-sync";
+import { syncWithCloud, pushToCloud } from "@/lib/cloud-sync";
 import {
   cancelScheduledCues,
   playHapticClick,
@@ -825,16 +825,35 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth.loading, auth.session, auth.userId]);
 
-  /** Push local changes up, debounced, so the cloud copy stays current. */
+  /**
+   * Push local changes up, debounced. Deliberately push-only: pulling on every
+   * local edit would repeatedly re-apply remote state, which both fights the
+   * user's in-progress session and keeps retriggering "something changed".
+   * The full two-way reconcile happens on login and via the manual button.
+   */
   useEffect(() => {
     if (!auth.client || !auth.userId || statsVersion === 0) {
       return;
     }
+    const client = auth.client;
+    const userId = auth.userId;
     const timeout = window.setTimeout(() => {
-      void runCloudSync(true);
-    }, 4000);
+      void pushToCloud(client, userId).then((result) => {
+        if (!result.ok) {
+          setCloudState({ tone: "error", text: `Cloud-Upload fehlgeschlagen: ${result.error}` });
+          return;
+        }
+        markExported();
+        setCloudState({
+          tone: "ok",
+          text: `Cloud gesichert (${new Date().toLocaleTimeString("de-DE", {
+            hour: "2-digit",
+            minute: "2-digit",
+          })})`,
+        });
+      });
+    }, 5000);
     return () => window.clearTimeout(timeout);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statsVersion, auth.client, auth.userId]);
 
   // Hydrate the list-shaping stores after mount to avoid an SSR mismatch.
@@ -877,6 +896,75 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     if (order) setExerciseOrderByCategory(order);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Re-reads every store that is mirrored in React state from localStorage.
+   *
+   * The cloud pull writes straight to localStorage, so without this the lists
+   * would keep showing the pre-sync snapshot and the next save would write
+   * that stale copy back. Rehydrating in place is used instead of a reload:
+   * autosave keeps touching data, so "reload whenever something changed"
+   * turns into a permanent reload cycle.
+   */
+  const rehydrateFromStorage = () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const readJson = <T,>(storageKey: string): T | null => {
+      const raw = window.localStorage.getItem(storageKey);
+      if (!raw) {
+        return null;
+      }
+      try {
+        return JSON.parse(raw) as T;
+      } catch {
+        return null;
+      }
+    };
+
+    const custom = readJson<Record<string, string[]>>(customExercisesStorageKey);
+    if (custom) setCustomExercisesByCategory(custom);
+    const hidden = readJson<Record<string, string[]>>(hiddenExercisesStorageKey);
+    if (hidden) setHiddenExercisesByCategory(hidden);
+    const order = readJson<Record<string, string[]>>(exerciseOrderStorageKey);
+    if (order) setExerciseOrderByCategory(order);
+
+    const templates =
+      readJson<Record<string, WorkoutBuilderTemplate[]>>(workoutBuilderTemplatesStorageKey);
+    if (templates) setWorkoutBuilderTemplates(templates);
+    const hitSets = readJson<HitWorkoutSet[]>(hitWorkoutSetsStorageKey);
+    if (hitSets) setHitWorkoutSets(hitSets);
+    const composer = readJson<Record<string, string[]>>(routineComposerStorageKey);
+    if (composer) setRoutineComposerByCategory(composer);
+    const quickLoad = readJson<Record<string, LastQuickLoad>>(lastQuickLoadStorageKey);
+    if (quickLoad) setLastQuickLoadByCategory(quickLoad);
+
+    const storedGoals = readJson<Goal[]>(goalsStorageKey);
+    if (storedGoals) setGoals(storedGoals);
+    const storedProfile = readJson<Partial<UserProfile>>(profileStorageKey);
+    if (storedProfile) {
+      setProfile((current) => ({ ...current, ...storedProfile }));
+    }
+    const archive = readJson<JournalArchiveEntry[]>(journalArchiveStorageKey);
+    if (archive) setJournalArchive(archive);
+
+    // Day entries for the visible day, plus everything the dashboard derives.
+    const dayRaw = window.localStorage.getItem(
+      localStorageKey(selectedDate, selectedCategory),
+    );
+    if (dayRaw) {
+      try {
+        const parsed = JSON.parse(dayRaw) as LiteDayPayload;
+        setEntries(normalizeEntries(parsed.entries ?? [], activeExercisesRef.current));
+        setReflection(normalizeReflection(parsed.reflection));
+        setOverallBaseSeconds(parsed.overallSeconds ?? 0);
+      } catch {
+        // Leave the in-memory day alone if the stored copy is unreadable.
+      }
+    }
+    setStatsVersion((current) => current + 1);
+    setHistoryInfo(readLocalHistory());
+  };
 
   useEffect(() => {
     const isTicking =
@@ -2805,23 +2893,17 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       const changed = daysAdded + daysUpdated + documentsMerged;
 
       if (changed > 0) {
-        /**
-         * The merge wrote straight to localStorage, but routines, exercise
-         * selections and order live in React state that was hydrated earlier.
-         * Leaving them stale would not just show outdated lists - the next
-         * save would write the stale copy back and destroy what was pulled.
-         * A reload is the only reliable way to rebuild every store, and it
-         * terminates because a second sync finds nothing left to change.
-         */
+        // Rebuild the mirrored stores in place. No reload: autosave keeps
+        // touching data, so reloading on every change would never settle.
+        rehydrateFromStorage();
+        setCloudMessage({
+          tone: "ok",
+          text: `Cloud geladen: ${daysAdded} ergänzt, ${daysUpdated} aktualisiert.`,
+        });
         setCloudState({
           tone: "ok",
-          text: `Cloud geladen: ${daysAdded} Tage ergänzt, ${daysUpdated} aktualisiert – wird geöffnet ...`,
+          text: `Cloud geladen: ${daysAdded} Tage ergänzt, ${daysUpdated} aktualisiert (${stamp})`,
         });
-        localStorage.setItem(
-          lastRestoreStorageKey,
-          `Cloud geladen: ${daysAdded} Tage ergänzt, ${daysUpdated} aktualisiert.`,
-        );
-        window.setTimeout(() => window.location.reload(), 1200);
         return;
       }
 
