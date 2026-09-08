@@ -69,6 +69,21 @@ export type BackupBundle = {
   };
 };
 
+/** Documents whose entries are addressed by `name` and can be deleted. */
+const routineTemplatesKey = "momentum-builder:templates:v1";
+const hitSetsKey = "momentum-hit:sets:v1";
+/**
+ * Tombstones - the names the user deleted on purpose.
+ *
+ * A union merge cannot express a deletion: the deleted routine is simply absent
+ * locally, so the copy still present in the cloud (or in an older export) always
+ * wins and the routine reappears on the next pull. That makes the delete button
+ * look broken. Recording the deleted names makes the intent explicit and
+ * survives the merge.
+ */
+const deletedRoutinesKey = "momentum-builder:removed-presets:v1";
+const deletedHitSetsKey = "momentum-hit:removed-sets:v1";
+
 function readRevisions(): Record<string, string> {
   try {
     const raw = localStorage.getItem(revisionsKey);
@@ -76,6 +91,57 @@ function readRevisions(): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+function readStoredJson(storageKey: string): unknown {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    return raw === null ? null : JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function isStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function unionStrings(incoming: unknown, local: unknown): string[] {
+  const merged = new Set<string>();
+  for (const item of isStringList(incoming) ? incoming : []) {
+    merged.add(item);
+  }
+  for (const item of isStringList(local) ? local : []) {
+    merged.add(item);
+  }
+  return Array.from(merged);
+}
+
+/** Routine names the user deleted in `category`. */
+function deletedRoutineNames(category: string): Set<string> {
+  const stored = readStoredJson(deletedRoutinesKey);
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
+    return new Set();
+  }
+  const list = (stored as Record<string, unknown>)[category];
+  return new Set(isStringList(list) ? list : []);
+}
+
+/** HIT set names the user deleted. */
+function deletedHitSetNames(): Set<string> {
+  const stored = readStoredJson(deletedHitSetsKey);
+  return new Set(isStringList(stored) ? stored : []);
+}
+
+/**
+ * Tombstones must be merged before the documents they suppress, otherwise a
+ * deletion made on another device arrives too late to filter this restore.
+ */
+function sortTombstonesFirst<T>(entries: Array<[string, T]>): Array<[string, T]> {
+  const isTombstone = (key: string) => key === deletedRoutinesKey || key === deletedHitSetsKey;
+  return [...entries].sort(
+    (a, b) => Number(isTombstone(b[0])) - Number(isTombstone(a[0])),
+  );
 }
 
 /** Stamps a storage key as modified now. Used by the autosave path. */
@@ -402,6 +468,13 @@ function mergeDocument(storageKey: string, incoming: unknown): boolean {
 
   // Goals and journal entries: union by a stable identity.
   if (Array.isArray(local) && Array.isArray(incoming)) {
+    // Tombstone lists are plain string arrays: union them, so a deletion made
+    // on one device is not undone by an older copy from another.
+    if (storageKey === deletedHitSetsKey) {
+      return writeIfChanged(storageKey, unionStrings(incoming, local));
+    }
+
+    const removed = storageKey === hitSetsKey ? deletedHitSetNames() : new Set<string>();
     const identity = (item: Record<string, unknown>) =>
       (item.id as string) ??
       `${(item.dateKey as string) ?? ""}|${(item.category as string) ?? ""}|${
@@ -409,6 +482,9 @@ function mergeDocument(storageKey: string, incoming: unknown): boolean {
       }`;
     const byId = new Map<string, unknown>();
     for (const item of incoming as Array<Record<string, unknown>>) {
+      if (removed.has(String(item?.name))) {
+        continue;
+      }
       byId.set(identity(item), item);
     }
     // Local wins on collision: it is the more recently used copy.
@@ -431,11 +507,17 @@ function mergeDocument(storageKey: string, incoming: unknown): boolean {
     for (const [key, value] of Object.entries(local as Record<string, unknown>)) {
       const incomingValue = (incoming as Record<string, unknown>)[key];
       if (Array.isArray(value) && Array.isArray(incomingValue)) {
-        // Named routines: union by name, local wins.
+        // Named routines: union by name, local wins - but never resurrect one
+        // the user deleted here.
         const named = value.every((item) => item && typeof item === "object" && "name" in item);
         if (named) {
+          const removed =
+            storageKey === routineTemplatesKey ? deletedRoutineNames(key) : new Set<string>();
           const byName = new Map<string, unknown>();
           for (const item of incomingValue as Array<Record<string, unknown>>) {
+            if (removed.has(String(item?.name))) {
+              continue;
+            }
             byName.set(String(item.name), item);
           }
           for (const item of value as Array<Record<string, unknown>>) {
@@ -444,9 +526,32 @@ function mergeDocument(storageKey: string, incoming: unknown): boolean {
           merged[key] = Array.from(byName.values());
           continue;
         }
+        // Per-category tombstone lists: union, so deletions propagate.
+        if (storageKey === deletedRoutinesKey) {
+          merged[key] = unionStrings(incomingValue, value);
+          continue;
+        }
       }
       merged[key] = value;
     }
+
+    // Categories that exist only in the incoming copy never pass through the
+    // loop above, so filter their tombstoned routines out here as well.
+    if (storageKey === routineTemplatesKey) {
+      for (const [category, value] of Object.entries(merged)) {
+        if (!Array.isArray(value)) {
+          continue;
+        }
+        const removed = deletedRoutineNames(category);
+        if (removed.size === 0) {
+          continue;
+        }
+        merged[category] = (value as Array<Record<string, unknown>>).filter(
+          (item) => !removed.has(String(item?.name)),
+        );
+      }
+    }
+
     return writeIfChanged(storageKey, merged);
   }
 
@@ -534,7 +639,9 @@ export function restoreBackupBundle(
       }
     }
 
-    for (const [storageKey, value] of Object.entries(parsed.data.documents ?? {})) {
+    for (const [storageKey, value] of sortTombstonesFirst(
+      Object.entries(parsed.data.documents ?? {}),
+    )) {
       // Older bundles may still carry a session; refuse to restore it.
       if (!storageKey.startsWith("momentum-") || isExcludedFromBackup(storageKey)) {
         continue;

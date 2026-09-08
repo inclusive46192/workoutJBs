@@ -11,7 +11,14 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
  * Session handling is tuned for a personal PWA:
  * - persistSession + localStorage  -> stays logged in until explicit logout
  * - autoRefreshToken               -> survives long gaps between sessions
- * - detectSessionInUrl             -> completes magic-link / OAuth redirects
+ * - detectSessionInUrl: false      -> `completeAuthFromUrl` does this instead,
+ *   so a failing link produces a readable message rather than a silent hang,
+ *   and the spent token is removed from the address bar afterwards.
+ *
+ * PKCE stays on for OAuth, where the provider returns to the same browser that
+ * started the flow. Magic links must not depend on it: on iOS the mail app
+ * opens a different browser than the installed PWA, so the code verifier is
+ * missing there. Those links use `token_hash` instead.
  */
 
 let cached: SupabaseClient | null = null;
@@ -35,7 +42,7 @@ export function getSupabaseClient(): SupabaseClient | null {
     auth: {
       persistSession: true,
       autoRefreshToken: true,
-      detectSessionInUrl: true,
+      detectSessionInUrl: false,
       flowType: "pkce",
       storageKey: "momentum-auth:v1",
     },

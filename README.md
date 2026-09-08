@@ -89,6 +89,15 @@ Damit ueber Geraetewechsel und Neuinstallationen hinweg keine Tage fehlen:
 - **Konfliktregel:** Bei demselben Tag auf beiden Seiten gewinnt der Datensatz
   mit mehr erledigten Uebungen; erst bei Gleichstand entscheidet `updatedAt`.
   So wird ein geloggtes Training nie gegen einen leeren Tag getauscht.
+- **Loeschungen ueberleben den Merge.** Eine Vereinigung kann eine Loeschung
+  nicht ausdruecken: die geloeschte Routine fehlt lokal einfach, also gewinnt
+  die Kopie aus Cloud oder Datei und die Routine ist wieder da - der
+  Loeschen-Button wirkt kaputt. Deshalb merkt sich die App die geloeschten Namen
+  (`momentum-builder:removed-presets:v1` fuer Routinen,
+  `momentum-hit:removed-sets:v1` fuer HIT-Sets) und filtert sie beim Merge
+  heraus. Diese Listen liegen mit im Backup, damit eine Loeschung auch auf die
+  anderen Geraete wandert. Speichern unter demselben Namen hebt die Markierung
+  wieder auf.
 - **Export-Erinnerung:** Sammeln sich Trainingstage seit dem letzten Backup an,
   weist die App darauf hin. Ansonsten zeigt sie den Umfang der Historie
   (Anzahl Tage, Zeitraum, letzte Sicherung).
@@ -162,21 +171,44 @@ laeuft die App unveraendert weiter.
 3. Unter **Authentication → Providers** aktivieren, was du nutzen willst:
    - **Email** – liefert Magic Link *und* 6-stelligen Code in derselben Mail
    - **Google / GitHub** – jeweils Client-ID und Secret hinterlegen
-4. Unter **Authentication → URL Configuration** die Site-URL und die Redirect-
+4. Unter **Authentication → Emails** beide Vorlagen ersetzen. **Das ist der
+   Schritt, ohne den kein Zahlencode ankommt** – die Standardvorlagen enthalten
+   nur den Link:
+   - "Magic Link" → [supabase/email-magic-link.html](./supabase/email-magic-link.html)
+   - "Confirm signup" → [supabase/email-confirm-signup.html](./supabase/email-confirm-signup.html)
+
+   In beiden die Beispiel-URL durch die eigene ersetzen.
+5. Unter **Authentication → URL Configuration** die Site-URL und die Redirect-
    URLs eintragen, z. B. `https://<projekt>.vercel.app` und
    `http://localhost:3000` fuer die lokale Entwicklung.
-5. `.env.local` anlegen:
+6. `.env.local` anlegen:
 
 ```env
 NEXT_PUBLIC_SUPABASE_URL=https://<projekt-id>.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon public key>
 ```
 
-6. Dieselben zwei Variablen in Vercel unter **Settings → Environment Variables**
+7. Dieselben zwei Variablen in Vercel unter **Settings → Environment Variables**
    hinterlegen und neu deployen.
 
 Fehlen die Variablen, blendet die App den Cloud-Bereich einfach aus und
 verhaelt sich wie der reine Offline-Build.
+
+### Warum die Vorlagen `token_hash` statt `ConfirmationURL` nutzen
+
+Der Standard-Link fuehrt ueber den PKCE-Ablauf. Dabei wird beim Anfordern der
+Mail ein *Code-Verifier* im Speicher genau des Browsers abgelegt, der die Mail
+angefordert hat. Auf dem iPhone passiert aber genau das: angefordert wird in der
+installierten PWA, angetippt wird in Mail – und Mail oeffnet Safari mit eigenem
+Speicher. Der Verifier fehlt dort, der Login bricht ab oder haengt.
+
+Ein `token_hash`-Link braucht kein lokal gespeichertes Geheimnis und
+funktioniert deshalb in jedem Browser. Der Code aus derselben Mail funktioniert
+ohnehin ueberall und ist auf dem Handy der schnellere Weg: Das Eingabefeld ist
+als `one-time-code` ausgezeichnet, iOS bietet den Code also direkt zum
+Uebernehmen an. Sechs Ziffern loesen die Anmeldung sofort aus, und die
+angefangene Anmeldung ueberlebt einen Neustart der PWA – sonst waere das Feld
+weg, sobald man zur Mail-App wechselt.
 
 ### Wie der Abgleich funktioniert
 

@@ -39,7 +39,7 @@ import {
   type GoalType,
 } from "@/lib/goals";
 import { useWakeLock } from "@/hooks/use-wake-lock";
-import { useAuth, type AuthProvider } from "@/hooks/use-auth";
+import { useAuth, sanitizeOtpCode, type AuthProvider } from "@/hooks/use-auth";
 import { syncWithCloud, pushToCloud } from "@/lib/cloud-sync";
 import {
   cancelScheduledCues,
@@ -185,8 +185,13 @@ const signalPrefsStorageKey = "momentum-signals:prefs:v1";
 const lastSetValuesStorageKey = "momentum-sets:last-values:v1";
 const goalsStorageKey = "momentum-goals:v1";
 const restorePromptDismissedKey = "momentum-sync:restore-prompt-dismissed:v1";
-/** Preset routines the user deleted; kept so they are not re-seeded on start. */
+/**
+ * Routine names the user deleted. Two jobs: presets must not be re-seeded on
+ * start, and no routine may be resurrected by a merge from cloud or file.
+ */
 const removedPresetsStorageKey = "momentum-builder:removed-presets:v1";
+/** HIT set names the user deleted, for the same reason. */
+const removedHitSetsStorageKey = "momentum-hit:removed-sets:v1";
 /** One-shot message that survives the reload after a restore. */
 const lastRestoreStorageKey = "momentum-sync:last-restore:v1";
 /** Upper bound for sets seeded from a preset or default. */
@@ -611,7 +616,6 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   const auth = useAuth();
   const [authEmail, setAuthEmail] = useState("");
   const [authCode, setAuthCode] = useState("");
-  const [codeSent, setCodeSent] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [authMessage, setAuthMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(
     null,
@@ -624,6 +628,25 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   const [cloudState, setCloudState] = useState<{ tone: "ok" | "error"; text: string } | null>(
     null,
   );
+
+  // A tapped login link reports its outcome once the app has reopened. Without
+  // this the user would come back to an unchanged screen and no explanation.
+  const { linkMessage, clearLinkMessage } = auth;
+  useEffect(() => {
+    if (!linkMessage) {
+      return;
+    }
+    setAuthMessage(linkMessage);
+    clearLinkMessage();
+  }, [linkMessage, clearLinkMessage]);
+
+  // Restore the address a pending code belongs to, so the field is usable even
+  // after the PWA was evicted while the mail app was open.
+  useEffect(() => {
+    if (auth.pendingLogin && !authEmail) {
+      setAuthEmail(auth.pendingLogin.email);
+    }
+  }, [auth.pendingLogin, authEmail]);
   const [hitWorkSeconds, setHitWorkSeconds] = useState(40);
   const [hitRestSeconds, setHitRestSeconds] = useState(20);
   const [prepSecondsSetting, setPrepSecondsSetting] = useState(10);
@@ -686,6 +709,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   const [saveConfirmation, setSaveConfirmation] = useState<string | null>(null);
   /** Deleted preset names per category, so they stay deleted. */
   const [removedPresets, setRemovedPresets] = useState<Record<string, string[]>>({});
+  const [removedHitSets, setRemovedHitSets] = useState<string[]>([]);
   /** HIT set awaiting an overwrite confirmation. */
   const [pendingHitOverwriteName, setPendingHitOverwriteName] = useState<string | null>(null);
   /** HIT set awaiting a delete confirmation. */
@@ -965,6 +989,13 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     const quickLoad = readJson<Record<string, LastQuickLoad>>(lastQuickLoadStorageKey);
     if (quickLoad) setLastQuickLoadByCategory(quickLoad);
 
+    // Tombstones travel with the backup, so a deletion made on another device
+    // must reach the seeding effect here too.
+    const removed = readJson<Record<string, string[]>>(removedPresetsStorageKey);
+    if (removed) setRemovedPresets(removed);
+    const removedHit = readJson<string[]>(removedHitSetsStorageKey);
+    if (removedHit) setRemovedHitSets(removedHit);
+
     const storedGoals = readJson<Goal[]>(goalsStorageKey);
     if (storedGoals) setGoals(storedGoals);
     const storedProfile = readJson<Partial<UserProfile>>(profileStorageKey);
@@ -1077,6 +1108,15 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     if (rawRemovedPresets) {
       try {
         setRemovedPresets(JSON.parse(rawRemovedPresets) as Record<string, string[]>);
+      } catch {
+        // ignore malformed list
+      }
+    }
+
+    const rawRemovedHitSets = localStorage.getItem(removedHitSetsStorageKey);
+    if (rawRemovedHitSets) {
+      try {
+        setRemovedHitSets(JSON.parse(rawRemovedHitSets) as string[]);
       } catch {
         // ignore malformed list
       }
@@ -2597,6 +2637,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
         [selectedCategory]: forCategory.filter((item) => item !== trimmed),
       };
       localStorage.setItem(removedPresetsStorageKey, JSON.stringify(next));
+      touchRevision(removedPresetsStorageKey);
       return next;
     });
     setSaveConfirmation(
@@ -2620,20 +2661,17 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
       return next;
     });
 
-    // If this was a built-in preset, remember the deletion: the seeding effect
-    // would otherwise add it straight back on the next start.
-    const isPreset = (defaultWorkoutBuilderTemplates[selectedCategory] ?? []).some(
-      (item) => item.name === name,
-    );
-    if (isPreset) {
-      setRemovedPresets((current) => {
-        const forCategory = new Set(current[selectedCategory] ?? []);
-        forCategory.add(name);
-        const next = { ...current, [selectedCategory]: Array.from(forCategory) };
-        localStorage.setItem(removedPresetsStorageKey, JSON.stringify(next));
-        return next;
-      });
-    }
+    // Remember every deletion, not just presets. The seeding effect would add a
+    // preset straight back on the next start, and a cloud pull would resurrect
+    // any routine that still exists in the backup copy.
+    setRemovedPresets((current) => {
+      const forCategory = new Set(current[selectedCategory] ?? []);
+      forCategory.add(name);
+      const next = { ...current, [selectedCategory]: Array.from(forCategory) };
+      localStorage.setItem(removedPresetsStorageKey, JSON.stringify(next));
+      touchRevision(removedPresetsStorageKey);
+      return next;
+    });
 
     // Drop it from the combine selection as well, otherwise it lingers there.
     setRoutineComposerByCategory((current) => {
@@ -2879,6 +2917,16 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     });
     setSelectedHitSetName(trimmed);
     setPendingHitOverwriteName(null);
+    // Saving under a deleted set's name means the user wants it back.
+    setRemovedHitSets((current) => {
+      if (!current.includes(trimmed)) {
+        return current;
+      }
+      const next = current.filter((item) => item !== trimmed);
+      localStorage.setItem(removedHitSetsStorageKey, JSON.stringify(next));
+      touchRevision(removedHitSetsStorageKey);
+      return next;
+    });
     setHitSetConfirmation(
       existing
         ? `HIT-Set "${trimmed}" überschrieben · ${filteredItems.length} Übungen`
@@ -2899,6 +2947,16 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     if (selectedHitSetName === name) {
       setSelectedHitSetName("");
     }
+    // Tombstone, so a cloud pull or file import cannot bring the set back.
+    setRemovedHitSets((current) => {
+      if (current.includes(name)) {
+        return current;
+      }
+      const next = [...current, name];
+      localStorage.setItem(removedHitSetsStorageKey, JSON.stringify(next));
+      touchRevision(removedHitSetsStorageKey);
+      return next;
+    });
     setPendingHitDeleteName(null);
     setHitSetConfirmation(`HIT-Set "${name}" gelöscht`);
     setErrorText("");
@@ -3044,18 +3102,49 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
     setAuthBusy(false);
     setAuthMessage({ tone: result.ok ? "ok" : "error", text: result.message });
     if (result.ok) {
-      setCodeSent(true);
+      setAuthCode("");
     }
   };
 
-  const handleVerifyCode = async () => {
+  const handleVerifyCode = async (codeOverride?: string) => {
+    const code = sanitizeOtpCode(codeOverride ?? authCode);
+    const address = auth.pendingLogin?.email ?? authEmail;
     setAuthBusy(true);
-    const result = await auth.verifyEmailCode(authEmail, authCode);
+    const result = await auth.verifyEmailCode(address, code);
     setAuthBusy(false);
     setAuthMessage({ tone: result.ok ? "ok" : "error", text: result.message });
     if (result.ok) {
       setAuthCode("");
-      setCodeSent(false);
+    }
+  };
+
+  /**
+   * Digits only, so autofill and a pasted "123 456" both land correctly.
+   * A complete code submits straight away - on a phone that saves a tap while
+   * the code is still on screen in the mail notification.
+   */
+  const handleCodeInput = (raw: string) => {
+    const code = sanitizeOtpCode(raw);
+    setAuthCode(code);
+    if (code.length === 6 && !authBusy) {
+      void handleVerifyCode(code);
+    }
+  };
+
+  const handlePasteCode = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      const code = sanitizeOtpCode(text);
+      if (!code) {
+        setAuthMessage({ tone: "error", text: "In der Zwischenablage steht kein Code." });
+        return;
+      }
+      handleCodeInput(code);
+    } catch {
+      setAuthMessage({
+        tone: "error",
+        text: "Einfügen wurde blockiert. Tippe den Code bitte direkt ein.",
+      });
     }
   };
 
@@ -3286,7 +3375,15 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
   }, [bodybuildingFocusExercise, isBodybuilding, visibleEntries]);
 
   const routineComposerSelection = routineComposerByCategory[selectedCategory] ?? [];
-  const savedRoutines = workoutBuilderTemplates[selectedCategory] ?? [];
+  // Filter tombstoned entries defensively: a merge from an older backup could
+  // still carry a routine the user deleted, and it must never reappear.
+  const deletedRoutineNames = removedPresets[selectedCategory] ?? [];
+  const savedRoutines = (workoutBuilderTemplates[selectedCategory] ?? []).filter(
+    (template) => !deletedRoutineNames.includes(template.name),
+  );
+  const visibleHitWorkoutSets = hitWorkoutSets.filter(
+    (setItem) => !removedHitSets.includes(setItem.name),
+  );
   const selectedPresetNote =
     presetRoutines.find(
       (preset) =>
@@ -3974,28 +4071,69 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                         onClick={() => void handleSendCode()}
                         className="min-h-11 touch-manipulation rounded-lg bg-teal-700 px-3 text-sm font-semibold text-white disabled:opacity-50"
                       >
-                        {authBusy ? "Sende ..." : "Link & Code senden"}
+                        {authBusy
+                          ? "Sende ..."
+                          : auth.pendingLogin
+                            ? "Neue Mail senden"
+                            : "Link & Code senden"}
                       </button>
 
-                      {codeSent ? (
-                        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-                          <input
-                            inputMode="numeric"
-                            autoComplete="one-time-code"
-                            value={authCode}
-                            onChange={(event) => setAuthCode(event.target.value)}
-                            placeholder="6-stelliger Code"
-                            className="min-h-11 rounded-lg border border-slate-400 px-3 text-sm tracking-[0.3em] text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
-                          />
-                          <button
-                            type="button"
-                            disabled={authBusy || !authCode.trim()}
-                            onClick={() => void handleVerifyCode()}
-                            className="min-h-11 touch-manipulation rounded-lg bg-emerald-600 px-3 text-sm font-semibold text-white disabled:opacity-50"
-                          >
-                            Bestätigen
-                          </button>
-                        </div>
+                      {auth.pendingLogin ? (
+                        <form
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            void handleVerifyCode();
+                          }}
+                          className="grid gap-2 rounded-lg border border-teal-300 bg-teal-50 p-2 dark:border-teal-800 dark:bg-teal-950/40"
+                        >
+                          <p className="text-[11px] font-semibold text-teal-900 dark:text-teal-200">
+                            Mail an {auth.pendingLogin.email}. Tippe den Link an – oder gib
+                            hier den 6-stelligen Code ein.
+                          </p>
+                          <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                            <input
+                              type="text"
+                              name="one-time-code"
+                              inputMode="numeric"
+                              pattern="[0-9]*"
+                              maxLength={6}
+                              autoComplete="one-time-code"
+                              enterKeyHint="go"
+                              aria-label="6-stelliger Code aus der Mail"
+                              value={authCode}
+                              onChange={(event) => handleCodeInput(event.target.value)}
+                              placeholder="123456"
+                              className="min-h-11 rounded-lg border border-slate-400 px-3 text-center text-lg font-bold tracking-[0.4em] text-slate-900 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => void handlePasteCode()}
+                              className="min-h-11 touch-manipulation rounded-lg border-2 border-teal-700 px-3 text-sm font-bold text-teal-800 dark:text-teal-300"
+                            >
+                              Einfügen
+                            </button>
+                          </div>
+                          <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                            <button
+                              type="submit"
+                              disabled={authBusy || authCode.length !== 6}
+                              className="min-h-11 touch-manipulation rounded-lg bg-emerald-600 px-3 text-sm font-semibold text-white disabled:opacity-50"
+                            >
+                              {authBusy ? "Prüfe ..." : "Bestätigen"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                auth.cancelPendingLogin();
+                                setAuthCode("");
+                                setAuthMessage(null);
+                              }}
+                              className="min-h-11 touch-manipulation rounded-lg border border-slate-400 px-3 text-sm font-semibold text-slate-700 dark:border-slate-600 dark:text-slate-200"
+                            >
+                              Abbrechen
+                            </button>
+                          </div>
+                        </form>
                       ) : null}
                     </div>
 
@@ -5024,7 +5162,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                 <p className="text-[11px] font-bold uppercase tracking-wide text-teal-800 dark:text-teal-300">
                   Gespeicherte Routine laden
                 </p>
-                <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+                <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto_auto]">
                   <select
                     value={selectedWorkoutBuilderName}
                     onChange={(event) => setSelectedWorkoutBuilderName(event.target.value)}
@@ -5044,7 +5182,53 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                   >
                     Laden
                   </button>
+                  <button
+                    type="button"
+                    disabled={!selectedWorkoutBuilderName}
+                    onClick={() => setPendingDeleteName(selectedWorkoutBuilderName)}
+                    aria-label={
+                      selectedWorkoutBuilderName
+                        ? `${selectedWorkoutBuilderName} löschen`
+                        : "Routine löschen"
+                    }
+                    className="min-h-11 touch-manipulation rounded-lg border-2 border-rose-300 px-3 text-sm font-bold text-rose-700 disabled:opacity-40 dark:border-rose-800 dark:text-rose-300"
+                  >
+                    Löschen
+                  </button>
                 </div>
+
+                {pendingDeleteName ? (
+                  <div className="mt-2 rounded-md border border-rose-300 bg-rose-50 px-2.5 py-2 dark:border-rose-800 dark:bg-rose-950/40">
+                    <p className="text-[11px] font-semibold text-rose-900 dark:text-rose-200">
+                      „{pendingDeleteName}“ wirklich löschen?
+                    </p>
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => deleteWorkoutBuilderTemplate(pendingDeleteName)}
+                        className="min-h-11 flex-1 touch-manipulation rounded-lg bg-rose-600 px-3 text-xs font-bold text-white"
+                      >
+                        Ja, löschen
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPendingDeleteName(null)}
+                        className="min-h-11 flex-1 touch-manipulation rounded-lg border-2 border-slate-300 px-3 text-xs font-bold text-slate-700 dark:border-slate-700 dark:text-slate-200"
+                      >
+                        Abbrechen
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {saveConfirmation ? (
+                  <p
+                    role="status"
+                    className="mt-2 rounded-md bg-emerald-100 px-2.5 py-2 text-[11px] font-semibold text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200"
+                  >
+                    ✓ {saveConfirmation}
+                  </p>
+                ) : null}
 
                 {selectedPresetNote ? (
                   <p className="mt-2 rounded-md bg-teal-100 px-2.5 py-2 text-[11px] font-medium text-teal-900 dark:bg-teal-900/40 dark:text-teal-200">
@@ -6018,7 +6202,7 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                 className="rounded-md border border-fuchsia-300 bg-white px-2 py-2 text-sm text-slate-900 dark:text-slate-100 dark:bg-slate-900 dark:border-fuchsia-800"
               >
                 <option value="">Workout-Set wählen</option>
-                {hitWorkoutSets.map((setItem) => (
+                {visibleHitWorkoutSets.map((setItem) => (
                   <option key={setItem.name} value={setItem.name}>
                     {setItem.name}
                   </option>
@@ -6032,13 +6216,13 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                 Set laden
               </button>
             </div>
-            {hitWorkoutSets.length > 0 ? (
+            {visibleHitWorkoutSets.length > 0 ? (
               <div className="mt-3">
                 <p className="text-[11px] font-bold uppercase tracking-wide text-fuchsia-800 dark:text-fuchsia-300">
                   Gespeicherte HIT-Sets
                 </p>
                 <div className="mt-1.5 grid gap-1.5">
-                  {hitWorkoutSets.map((setItem) => (
+                  {visibleHitWorkoutSets.map((setItem) => (
                     <div
                       key={`hit-set-${setItem.name}`}
                       className="rounded-lg border border-fuchsia-200 bg-white p-2 dark:border-fuchsia-800 dark:bg-slate-900"
