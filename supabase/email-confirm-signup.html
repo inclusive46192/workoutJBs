@@ -1,32 +1,24 @@
 <!--
   Supabase > Authentication > Emails > "Confirm signup"
 
-  This is the mail a brand new address receives. `signInWithOtp` with
-  `shouldCreateUser: true` sends this one instead of the magic link template,
-  so it needs the same two options - otherwise the very first login is the one
-  that fails.
+  Das ist die Mail, die eine noch unbekannte Adresse beim allerersten Mal
+  bekommt - `signInWithOtp` mit `shouldCreateUser: true` verschickt diese
+  Vorlage statt der Magic-Link-Vorlage.
 
-  Note `type=signup` here, where the magic link template uses `type=magiclink`.
+  Wird sie vergessen, scheitert ausgerechnet die erste Anmeldung: es kaeme ein
+  Link statt eines Codes an.
 
-  Replace https://your-app.vercel.app with the deployed URL.
+  Ebenfalls bewusst ohne Link, aus demselben Grund wie bei der Magic-Link-
+  Vorlage.
 -->
-<h2>Momentum Journal – Konto bestätigen</h2>
+<h2>Momentum Journal – Konto bestaetigen</h2>
 
-<p>Tippe auf den Button, um dein Konto zu bestätigen und dich anzumelden:</p>
+<p>Dein Code zum Bestaetigen und Anmelden lautet:</p>
 
-<p>
-  <a
-    href="https://your-app.vercel.app/?token_hash={{ .TokenHash }}&type=signup"
-    style="display:inline-block;padding:12px 20px;border-radius:10px;background:#0f766e;color:#ffffff;font-weight:700;text-decoration:none"
-  >
-    Konto bestätigen
-  </a>
-</p>
+<p style="font-size:32px;font-weight:700;letter-spacing:8px">{{ .Token }}</p>
 
-<p>Oder gib diesen Code in der App ein:</p>
-
-<p style="font-size:28px;font-weight:700;letter-spacing:6px">{{ .Token }}</p>
+<p>Gib ihn in der App ein.</p>
 
 <p style="color:#64748b;font-size:12px">
-  Der Code und der Link sind eine Stunde gültig.
+  Der Code ist eine Stunde gueltig.
 </p>

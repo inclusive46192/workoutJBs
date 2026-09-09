@@ -14,9 +14,10 @@ import { completeAuthFromUrl } from "@/lib/auth-link";
  * The session is persisted in localStorage and auto-refreshed, so the user
  * stays signed in until they explicitly sign out.
  *
- * One mail offers two ways in: tapping the link, or typing the six digit code.
- * The code is the reliable one on a phone, because reading the mail can send
- * the link into a different browser than the PWA it was requested from.
+ * Email login is code-based on purpose. A link tapped in the mail app opens the
+ * default browser rather than the installed PWA, so the session would land in
+ * the wrong storage context - and under PKCE the code verifier is missing there
+ * entirely. A code is entered where it is meant to take effect.
  */
 
 export type AuthProvider = "google" | "github";
@@ -85,7 +86,7 @@ export type AuthState = {
 };
 
 export type AuthActions = {
-  /** Sends a mail containing both a magic link and a 6-digit code. */
+  /** Sends a mail containing the 6-digit login code. */
   sendEmailCode: (email: string) => Promise<{ ok: boolean; message: string }>;
   /** Completes the login with the code from that mail. */
   verifyEmailCode: (email: string, code: string) => Promise<{ ok: boolean; message: string }>;
@@ -161,9 +162,11 @@ export function useAuth(): AuthState & AuthActions {
       if (!trimmed) {
         return { ok: false, message: "Bitte eine E-Mail-Adresse eingeben." };
       }
+      // No `emailRedirectTo`: the mail carries a code, not a link, so there is
+      // nothing to redirect back from.
       const { error } = await client.auth.signInWithOtp({
         email: trimmed,
-        options: { emailRedirectTo: getAuthRedirectUrl(), shouldCreateUser: true },
+        options: { shouldCreateUser: true },
       });
       if (error) {
         return { ok: false, message: error.message };
@@ -173,7 +176,7 @@ export function useAuth(): AuthState & AuthActions {
       setPendingLogin(next);
       return {
         ok: true,
-        message: "Mail gesendet. Entweder den Link antippen oder den Code hier eintragen.",
+        message: "Code gesendet. Er ist eine Stunde gültig.",
       };
     },
     [client],

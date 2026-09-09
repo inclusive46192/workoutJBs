@@ -4074,8 +4074,8 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                         {authBusy
                           ? "Sende ..."
                           : auth.pendingLogin
-                            ? "Neue Mail senden"
-                            : "Link & Code senden"}
+                            ? "Neuen Code senden"
+                            : "Code senden"}
                       </button>
 
                       {auth.pendingLogin ? (
@@ -4087,8 +4087,8 @@ export function RoutineJournal({ categories, hiddenLiteHero = false }: RoutineJo
                           className="grid gap-2 rounded-lg border border-teal-300 bg-teal-50 p-2 dark:border-teal-800 dark:bg-teal-950/40"
                         >
                           <p className="text-[11px] font-semibold text-teal-900 dark:text-teal-200">
-                            Mail an {auth.pendingLogin.email}. Tippe den Link an – oder gib
-                            hier den 6-stelligen Code ein.
+                            Code an {auth.pendingLogin.email} gesendet. Gib die 6 Ziffern
+                            hier ein.
                           </p>
                           <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
                             <input

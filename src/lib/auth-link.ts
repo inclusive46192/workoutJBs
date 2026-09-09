@@ -1,20 +1,21 @@
 import type { EmailOtpType, SupabaseClient } from "@supabase/supabase-js";
 
 /**
- * Completing an email login that arrives back as a URL.
+ * Completing a login that arrives back as a URL.
  *
- * Two link styles can land here:
+ * Email login uses codes, not links, so the regular caller here is OAuth:
+ * Google and GitHub return to `?code=...`, which is exchanged for a session.
+ * That works because the provider comes back to the very same browser that
+ * started the flow, so the PKCE code verifier is present.
  *
- * 1. `?token_hash=...&type=...` - verified with `verifyOtp`. This needs no
- *    locally stored secret, so it also works when the mail app opens the link
- *    in a different browser than the one that requested it. That is the normal
- *    case on iOS: the request happens inside the installed PWA, the tap happens
- *    in Mail, and Safari opens with its own storage. This is the style the mail
- *    template should use.
- * 2. `?code=...` - the PKCE style. It requires the code verifier that was
- *    stored when the mail was requested, so it only works in the very same
- *    browser context. OAuth stays on this path because the provider returns to
- *    the same browser; magic links must not rely on it.
+ * Two further cases are handled defensively rather than as the normal path:
+ *
+ * 1. `?token_hash=...&type=...` - a link from an older mail template, verified
+ *    with `verifyOtp`. This needs no locally stored secret and therefore also
+ *    works when the mail app opened a different browser.
+ * 2. A stale or foreign `?code=...` whose verifier is missing, which is exactly
+ *    what happens when a link is tapped outside the installed PWA. This must
+ *    fail with an explanation instead of hanging.
  *
  * Supabase reports failures either as query parameters or in the URL fragment,
  * so both are inspected.
@@ -86,15 +87,15 @@ function stripAuthParams() {
 function describeLinkError(raw: string, code: string | null): string {
   const text = `${code ?? ""} ${raw}`.toLowerCase();
   if (text.includes("expired")) {
-    return "Der Link ist abgelaufen. Fordere eine neue Mail an oder nutze den 6-stelligen Code.";
+    return "Der Link ist abgelaufen. Fordere in der App einen neuen Code an.";
   }
   if (text.includes("code verifier")) {
-    return "Der Link wurde in einem anderen Browser geöffnet. Trage stattdessen den 6-stelligen Code aus derselben Mail hier ein.";
+    return "Der Link wurde in einem anderen Browser geöffnet. Melde dich in der App mit dem 6-stelligen Code an.";
   }
   if (text.includes("already") || text.includes("used")) {
-    return "Dieser Link wurde bereits verwendet. Fordere eine neue Mail an.";
+    return "Dieser Link wurde bereits verwendet. Fordere in der App einen neuen Code an.";
   }
-  return raw || "Die Anmeldung über den Link hat nicht geklappt.";
+  return raw || "Die Anmeldung hat nicht geklappt. Fordere in der App einen neuen Code an.";
 }
 
 /**

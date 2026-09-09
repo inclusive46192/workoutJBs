@@ -20,7 +20,7 @@ zuschaltbar (siehe unten).
 - Eigene Uebungen hinzufuegen, ausblenden und verwalten
 - **Autosave**: Aenderungen werden automatisch gespeichert
 - Sicherung per JSON-Export/Import (auf iOS direkt in iCloud Drive)
-- Optionales Cloud-Backup mit Login (Magic Link, Code, Google/GitHub)
+- Optionales Cloud-Backup mit Login (6-stelliger Code, Google/GitHub)
 
 ## Lokaler Start
 
@@ -169,18 +169,36 @@ laeuft die App unveraendert weiter.
    legt die Tabelle `backups` an und aktiviert Row Level Security, sodass jeder
    Nutzer ausschliesslich seine eigene Zeile sieht.
 3. Unter **Authentication → Providers** aktivieren, was du nutzen willst:
-   - **Email** – liefert Magic Link *und* 6-stelligen Code in derselben Mail
+   - **Email** – liefert den 6-stelligen Anmeldecode
    - **Google / GitHub** – jeweils Client-ID und Secret hinterlegen
 4. Unter **Authentication → Emails** beide Vorlagen ersetzen. **Das ist der
-   Schritt, ohne den kein Zahlencode ankommt** – die Standardvorlagen enthalten
-   nur den Link:
+   Schritt, ohne den kein Code ankommt** – die Standardvorlagen enthalten nur
+   einen Link:
    - "Magic Link" → [supabase/email-magic-link.html](./supabase/email-magic-link.html)
    - "Confirm signup" → [supabase/email-confirm-signup.html](./supabase/email-confirm-signup.html)
 
-   In beiden die Beispiel-URL durch die eigene ersetzen.
+   Die zweite ist leicht zu uebersehen: eine noch unbekannte Adresse bekommt
+   beim allerersten Mal *diese* Mail, nicht die Magic-Link-Vorlage.
+
+   **Achtung – Dashboard-Sperre:** Ohne eigenen SMTP-Server sind die Vorlagen
+   schreibgeschuetzt ("Setup Custom SMTP to edit the source"). Siehe
+   [SMTP einrichten](#smtp-einrichten-pflicht-fuer-die-vorlagen) weiter unten.
+
+   Alternativ setzt
+   [supabase/set-email-templates.ps1](./supabase/set-email-templates.ps1) die
+   Vorlagen ueber die Management API:
+
+   ```powershell
+   $env:SUPABASE_ACCESS_TOKEN = "sbp_..."   # https://supabase.com/dashboard/account/tokens
+   .\supabase\set-email-templates.ps1 -ProjectRef <projekt-id>
+   ```
+
+   Das Skript entfernt den Erklaerungs-Kommentar aus den HTML-Dateien und
+   bricht ab, falls `{{ .Token }}` fehlt.
 5. Unter **Authentication → URL Configuration** die Site-URL und die Redirect-
    URLs eintragen, z. B. `https://<projekt>.vercel.app` und
-   `http://localhost:3000` fuer die lokale Entwicklung.
+   `http://localhost:3000`. Das gilt nur noch fuer Google/GitHub – die
+   Anmeldung per Mail kommt ohne Rueckleitung aus.
 6. `.env.local` anlegen:
 
 ```env
@@ -194,21 +212,69 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon public key>
 Fehlen die Variablen, blendet die App den Cloud-Bereich einfach aus und
 verhaelt sich wie der reine Offline-Build.
 
-### Warum die Vorlagen `token_hash` statt `ConfirmationURL` nutzen
+### SMTP einrichten (Pflicht fuer die Vorlagen)
 
-Der Standard-Link fuehrt ueber den PKCE-Ablauf. Dabei wird beim Anfordern der
-Mail ein *Code-Verifier* im Speicher genau des Browsers abgelegt, der die Mail
-angefordert hat. Auf dem iPhone passiert aber genau das: angefordert wird in der
-installierten PWA, angetippt wird in Mail – und Mail oeffnet Safari mit eigenem
-Speicher. Der Verifier fehlt dort, der Login bricht ab oder haengt.
+Ohne eigenen SMTP-Server nutzt Supabase seinen Testversand. Der ist absichtlich
+eng begrenzt:
 
-Ein `token_hash`-Link braucht kein lokal gespeichertes Geheimnis und
-funktioniert deshalb in jedem Browser. Der Code aus derselben Mail funktioniert
-ohnehin ueberall und ist auf dem Handy der schnellere Weg: Das Eingabefeld ist
-als `one-time-code` ausgezeichnet, iOS bietet den Code also direkt zum
-Uebernehmen an. Sechs Ziffern loesen die Anmeldung sofort aus, und die
-angefangene Anmeldung ueberlebt einen Neustart der PWA – sonst waere das Feld
-weg, sobald man zur Mail-App wechselt.
+- **Vorlagen sind schreibgeschuetzt.** Das Dashboard blendet
+  *"Setup Custom SMTP to edit the source"* ein – und ohne eigene Vorlage kommt
+  nur ein Link statt eines Codes an.
+- **Nur an Adressen aus dem eigenen Team.** Alles andere scheitert mit *Email
+  address not authorized*.
+- **Rund 2 Mails pro Stunde.** Kommt beim Ausprobieren ploetzlich nichts mehr
+  an, ist meist das die Ursache – nicht die Vorlage.
+
+Fuer eine persoenliche App genuegt ein Gmail-Konto als Versender; eine eigene
+Domain ist dafuer nicht noetig (Resend verlangt eine, Gmail und Brevo nicht).
+
+**Gmail als SMTP-Server:**
+
+1. Im Google-Konto die Bestaetigung in zwei Schritten aktivieren – ohne sie gibt
+   es keine App-Passwoerter.
+2. Unter [App-Passwoerter](https://myaccount.google.com/apppasswords) eines
+   erzeugen (16 Zeichen). Das normale Kontopasswort funktioniert nicht.
+3. Unter **Authentication → Emails → SMTP Settings** eintragen:
+
+   | Feld         | Wert                     |
+   | ------------ | ------------------------ |
+   | Host         | `smtp.gmail.com`         |
+   | Port         | `465`                    |
+   | Username     | die eigene Gmail-Adresse |
+   | Password     | das App-Passwort         |
+   | Sender email | dieselbe Gmail-Adresse   |
+   | Sender name  | z. B. `Momentum Journal` |
+
+4. Speichern. Danach sind die Vorlagen editierbar und Schritt 4 oben laesst sich
+   nachholen.
+
+Nach dem Aktivieren setzt Supabase das Limit zunaechst auf 30 Mails pro Stunde;
+anpassbar unter **Authentication → Rate Limits**.
+
+### Warum Code statt Magic Link
+
+Ein Magic Link wird auf dem Handy in der Mail-App angetippt und oeffnet damit
+den Standardbrowser – nicht die installierte PWA. Die Sitzung landet also im
+falschen Speicherkontext. Beim PKCE-Ablauf kommt erschwerend dazu, dass der
+beim Anfordern hinterlegte *Code-Verifier* im Speicher der PWA liegt und dem
+Browser fehlt: der Login bricht ab oder haengt.
+
+Welche Variante verschickt wird, laesst sich uebrigens nicht pro Anfrage
+waehlen – `signInWithOtp` kennt fuer E-Mail keinen entsprechenden Parameter.
+Der Inhalt der Mail haengt allein an der Vorlage. Zwei Schaltflaechen "Link
+senden" und "Code senden" wuerden dieselbe Mail ausloesen und waeren damit
+irrefuehrend.
+
+Ein Code hat das Problem nicht: er wird dort eingegeben, wo er wirken soll. Das
+Eingabefeld ist als `one-time-code` ausgezeichnet, iOS bietet den Code also
+direkt zum Uebernehmen an. Sechs Ziffern loesen die Anmeldung sofort aus,
+Eingaben werden auf Ziffern reduziert (ein eingefuegtes "123 456" funktioniert
+also auch), und die angefangene Anmeldung ueberlebt einen Neustart der PWA –
+sonst waere das Feld weg, sobald das System die App beim Wechsel zur Mail-App
+verdraengt.
+
+Aeltere Mails mit Link funktionieren weiterhin, und ein fehlgeschlagener Link
+erklaert jetzt den Grund, statt stumm haengen zu bleiben.
 
 ### Wie der Abgleich funktioniert
 

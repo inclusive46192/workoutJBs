@@ -1,37 +1,27 @@
 <!--
   Supabase > Authentication > Emails > "Magic Link"
 
-  Two ways in from one mail:
+  Bewusst ohne Link: die Anmeldung laeuft ausschliesslich ueber den
+  sechsstelligen Code.
 
-  - The link uses {{ .TokenHash }} instead of {{ .ConfirmationURL }}. Redeeming
-    a token hash needs no secret stored in the browser, so it also works when
-    Mail opens the link in Safari while the app was installed as a PWA. The
-    default {{ .ConfirmationURL }} goes through the PKCE flow, which fails in
-    exactly that situation because the code verifier lives in the other browser.
-  - {{ .Token }} is the six digit code. It is missing from the default
-    template, which is why no code ever arrives until this is pasted in.
+  Grund: ein Link wird auf dem Handy in der Mail-App angetippt und oeffnet damit
+  den Standardbrowser - nicht die installierte PWA. Die Sitzung landet also im
+  falschen Speicherkontext, und beim PKCE-Ablauf fehlt dort zusaetzlich der beim
+  Anfordern hinterlegte Code-Verifier. Ein Code hat dieses Problem nicht: er
+  wird dort eingegeben, wo er wirken soll.
 
-  Replace https://your-app.vercel.app with the deployed URL, and make sure that
-  URL is listed under Authentication > URL Configuration > Redirect URLs.
+  {{ .Token }} ist der Code. In der Standardvorlage kommt er nicht vor - genau
+  deshalb kam bisher nur ein Link an.
 -->
-<h2>Momentum Journal – Anmelden</h2>
+<h2>Momentum Journal – Anmeldecode</h2>
 
-<p>Tippe auf den Button, um dich anzumelden:</p>
+<p>Dein Anmeldecode lautet:</p>
 
-<p>
-  <a
-    href="https://your-app.vercel.app/?token_hash={{ .TokenHash }}&type=magiclink"
-    style="display:inline-block;padding:12px 20px;border-radius:10px;background:#0f766e;color:#ffffff;font-weight:700;text-decoration:none"
-  >
-    Anmelden
-  </a>
-</p>
+<p style="font-size:32px;font-weight:700;letter-spacing:8px">{{ .Token }}</p>
 
-<p>Oder gib diesen Code in der App ein:</p>
-
-<p style="font-size:28px;font-weight:700;letter-spacing:6px">{{ .Token }}</p>
+<p>Gib ihn in der App ein, um dich anzumelden.</p>
 
 <p style="color:#64748b;font-size:12px">
-  Der Code und der Link sind eine Stunde gültig. Wenn du das nicht angefordert
-  hast, kannst du diese Mail ignorieren.
+  Der Code ist eine Stunde gueltig. Wenn du ihn nicht angefordert hast, kannst
+  du diese Mail ignorieren.
 </p>
